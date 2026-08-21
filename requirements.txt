@@ -1,0 +1,10 @@
+pyautogui
+openai
+pandas
+numpy
+pytesseract
+opencv-python
+Pillow
+pygetwindow
+faiss
+huggingface_hub
