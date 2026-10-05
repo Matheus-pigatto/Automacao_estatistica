@@ -1,1 +1,1 @@
-api_key="sk-d3b1a94843d74918a9f6c95f06ba4a2c"
+api_key="[sua_api_aqui]"
