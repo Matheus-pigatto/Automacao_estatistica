@@ -1,0 +1,8 @@
+# Ignorar arquivo 
+src/login.txt
+src/api_deepseek.txt
+
+# Outras linhas que já existem...
+__pycache__/
+*.pyc
+.env
