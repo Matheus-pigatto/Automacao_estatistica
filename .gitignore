@@ -6,3 +6,5 @@ src/api_deepseek.txt
 __pycache__/
 *.pyc
 .env
+.vscode/
+.venv/
