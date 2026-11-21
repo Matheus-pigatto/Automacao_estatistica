@@ -256,22 +256,39 @@ class AutomacaoADB:
         texto_aviso = self._extrair_texto_aviso(tree)
         inicio_ts = datetime.now()
         t0 = time()
+        delay_espera = int(self.config_ia.get("delay_bloqueio", 900))
 
         logging.warning(
             f"⏳ AVISO DE ESPERA após {cartelas_ate_aviso} cartelas! "
-            f"Texto: '{texto_aviso}' | Fechando aviso e reiniciando fluxo..."
+            f"Texto: '{texto_aviso}' | Fechando aviso e aguardando {delay_espera}s ({delay_espera // 60} min)..."
         )
         self.reportar_estado(
             80,
-            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Aguardando 20s para reiniciar...",
+            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Aguardando {delay_espera}s...",
         )
         self.telegram.enviar_mensagem(
             f"⏳ <b>Aviso de espera detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
-            f"Mensagem: <i>{texto_aviso}</i>\nAguardando 20s e voltando para a tela inicial..."
+            f"Mensagem: <i>{texto_aviso}</i>\nAguardando <b>{delay_espera}s</b> ({delay_espera // 60} min) antes de reiniciar..."
         )
 
         clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
-        sleep(20)
+
+        # Aguarda os 900s em fatias de 15s para atualizar o painel e responder rápido se o usuário encerrar
+        while True:
+            decorrido = int(time() - t0)
+            if decorrido >= delay_espera:
+                break
+            cfg_atual = self.carregar_config_dashboard()
+            if cfg_atual and cfg_atual.get("status") != "PROCESSANDO":
+                logging.info("🛑 Busca encerrada pelo usuário durante o tempo de espera.")
+                return False
+            restante = delay_espera - decorrido
+            self.reportar_estado(
+                80,
+                f"⏳ Aviso ({texto_aviso}) — aguardando {restante}s de {delay_espera}s...",
+            )
+            sleep(min(15, restante))
+
         tempo_espera_s = int(time() - t0)
 
         salvar_log_limite_espera(
@@ -284,9 +301,9 @@ class AutomacaoADB:
         # Verifica se o app voltou para Carrinho/Home (comportamento padrão após o aviso)
         tree_pos = dump_ui_xml()
         if existe_texto_na_tela(["Quero 1", "Quero 2", "Outra quantidade", "Participe e Concorra", "Seu saldo"], tree=tree_pos, contem=True):
-            logging.info("🔄 App voltou para Carrinho/Home após aviso. Retornando para a tela inicial e reentrando...")
+            logging.info(f"🔄 {tempo_espera_s}s concluídos. Retornando para a tela inicial e reentrando na busca...")
             self.telegram.enviar_mensagem(
-                f"🔄 <b>Reiniciando busca</b> após {tempo_espera_s}s de espera (app voltou ao Carrinho/Home)."
+                f"🔄 <b>Reiniciando busca</b> após {tempo_espera_s}s ({tempo_espera_s / 60:.1f} min) de espera."
             )
             return "REINICIAR_FLUXO"
 
