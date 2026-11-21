@@ -1,173 +1,61 @@
-from calendar import c
-from pydoc import cli
-from tkinter import N
-from typing import Any
-from numpy import empty
-import pyautogui
-from time import sleep, time
-import os
-from datetime import datetime
-import image_read
-from config import PROJECT_ROOT, SRC_DIR, SS_DIR, DB_DIR, ARVORE_DECISAO, MOLDES_DIR
 import json
-import pandas as pd
 import logging
-from adb_manipulation import match_template_adb, clicar_adb, capturar_cartela_android
-import gerenciadorjanelas as gj
-import subprocess
+import os
 import shutil
-import matplotlib.pyplot as plt
-import numpy as np
+from datetime import datetime
+from time import sleep, time
 
-from src import automacao
+import pandas as pd
 
+from adb_manipulation import (
+    abrir_app_android,
+    clicar_por_texto,
+    dump_ui_xml,
+    encontrar_no_xml,
+    escrever_texto_adb,
+    existe_texto_na_tela,
+    extrair_cartela_xml,
+    garantir_conexao_adb,
+    parse_bounds,
+    swipe_adb,
+    tap_adb,
+)
+from config import (
+    ADB_DEVICE,
+    ARVORE_DECISAO,
+    DB_DIR,
+    RAG_DIR,
+    SS_DIR,
+    get_login_credenciais,
+)
+from db.rag import SorteioRAG
+from telegram_bot import TelegramBot
 
-gerenciador = gj.GerenciadorJanelas()
-#sleep de 1 min e verificar login
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 class AutomacaoADB:
-    def __init__(self, agente_instanciado):
-        self.path_ss = os.path.join(SS_DIR, "print.PNG")
-        #self.target_device = "127.0.0.1:5555"
-        self.target_device = "emulator-5554"
-        self.agente = agente_instanciado
+    def __init__(self, rag_sorteios: SorteioRAG):
+        self.target_device = ADB_DEVICE
+        self.rag = rag_sorteios
+        self.telegram = TelegramBot()
+        self.config_ia = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]["fluxo"][1]["escolher_numeros_titulo"]["config"]
 
-    def executar_passo(self, dados_passo, timeout=10, treshold=0.8) -> bool:
-        """
-        Tenta encontrar e clicar em um elemento da árvore de decisão.
-        dados_passo: dicionário contendo 'moldes' e 'acao'
-        """
-        inicio = time()
-        moldes = dados_passo.get("moldes", [])
-        nome_passo = dados_passo.get("nome", "Passo desconhecido")
-
-        logging.info(f"Executando o passo: {nome_passo},\n molde: {moldes}")
-
-        while time() - inicio < timeout:
-            #capturar_cartela_android() # Atualiza o print
-            for molde in moldes:
-                molde_path = os.path.join(MOLDES_DIR, f"{molde}") # Ajuste o caminho da sua pasta de moldes
-                sucesso, x, y, w, h = match_template_adb(molde_path, self.path_ss, threshold=treshold)
-
-                print(f"Tentando encontrar {molde}... Sucesso: {sucesso}")
-                print(f"Coordenadas: x={x}, y={y}, w={w}, h={h}")
-                
-                if sucesso:
-                    logging.info(f"✅ Elemento encontrado: {molde}")
-                    if dados_passo.get("acao") == "clicar":
-                        sleep(0.5)
-                        status=clicar_adb(x, y, w, h, random_offset=5)
-                        print("")
-                        print("-"*50)
-                        print("")
-                        logging.info(f"O resultado do clique em {molde} foi: {status}")
-                        print("")
-                        print("-"*50)
-                    return True
-            
-            sleep(1) # Espera 1 segundo antes de tentar novamente (evita uso excessivo de CPU)
-        
-        logging.warning(f"❌ Timeout: Não foi possível encontrar {nome_passo}")
-        return False
-
-    def realizar_login(self):
-        self.reportar_estado(10, "A verificar login...")
-        logging.info("🔐 Iniciando processo de login via Árvore de Decisão...")
-        config_login = ARVORE_DECISAO["HOME"]["login"]
-        try: 
-            for m in config_login["ancora"]:
-                resp = match_template_adb(os.path.join(MOLDES_DIR, m), self.path_ss)
-                print(f"Retorno da comparação de {m} foi : {resp[0]}")
-                if resp[0] and m == "login_ok.PNG":
-                    logging.info("✅ Usuário já logado.")
-                    self.reportar_estado(30, "Aceder à área de compra...")
-                    return True
-                
-                elif resp[0] and m=="acessar_conta.PNG": 
-                    # 2. Executa passos de preenchimento
-                    logging.info("❌ Usuário não logado.") 
-                    self.reportar_estado(30, "Aceder à área de login...")
-                    logging.info(f"Carregando os passos:\n {config_login["passos"]}")
-
-                    for passo in config_login["passos"]:
-                        logging.info(f"\ncarregando o passo: {passo["nome"]}\n passo: {passo["acao"]}")
-                        if passo["acao"] == "preencher":
-                            cpf, senha = self.carregar_credenciais()
-                            # Aqui você chamaria uma função de input de texto ADB
-                            for m in passo["moldes"] :
-                                print(f"valor de m: {m}")
-                                resp = match_template_adb(os.path.join(MOLDES_DIR,m ), self.path_ss)
-                                clicar_adb(resp[1],resp[2],resp[3],resp[4])
-                                self.escrever_adb(passo['nome'], cpf if passo['nome'] == 'campo_cpf' else senha)
-                                self.reportar_estado(30, "Aceder à área de compra...")
-                            
-                        else:
-                            self.executar_passo(passo)
-                            self.reportar_estado(30, "Aceder à área de compra...")
-                    resp_btn_ativo = True
-
-                    while resp_btn_ativo == True:   
-                        nome, molde = config_login["passos"][3], config_login["passos"][3].get("moldes")
-                        resp_btn_ativo=self.garantir_botao_ativo(nome,molde[0])
-                        sleep(1)
-                    return True
-        except Exception as e:
-                logging.error(f"Erro ao realizar loggin: {e}")
-                print("")
-                print("-------------------------------------------------------")
-
-
-    def reportar_estado(self, percentual, mensagem):
-            """Atualiza o JSON para o Dashboard mostrar o progresso"""
-            caminho_config = os.path.join(DB_DIR, "config_automacao.json")
-            # Primeiro, carregamos o que já está lá para não apagar o resto das configs
-            config_atual = self.carregar_config_dashboard() or {}
-            try:
-                if os.path.exists(caminho_config):
-                    path_temp = caminho_config + ".tmp"
-                    config_atual["progresso"] = percentual
-                    config_atual["msg_status"] = mensagem
-                    with open(path_temp, "w", encoding='utf-8') as f:
-                        json.dump(config_atual, f, indent=4)
-
-                    os.replace(path_temp, caminho_config)
-                  
-                logging.info(f"📊 Progresso: {percentual}% - {mensagem}")
-                print("")
-                print("-------------------------------------------------------")
-            except Exception as e:
-                logging.error(f"Erro ao reportar estado: {e}")
-                print("")
-                print("-------------------------------------------------------")
-
-    def carregar_credenciais(self):
-        caminho = os.path.join("src", "login.txt")
+    def reportar_estado(self, percentual: int, mensagem: str) -> None:
+        """Atualiza o JSON para o Dashboard Streamlit mostrar o progresso."""
+        caminho_config = os.path.join(DB_DIR, "config_automacao.json")
+        config_atual = self.carregar_config_dashboard() or {}
         try:
-            with open(caminho, "r") as f:
-                linhas = [l.strip() for l in f.readlines() if l.strip()]
-                if len(linhas) >= 2:
-                    return linhas[0], linhas[1]
-                logging.error("❌ Arquivo de login deve ter pelo menos 2 linhas (CPF e Senha).")
-                print("")
-                print("-------------------------------------------------------")
-        except FileNotFoundError:
-            logging.error(f"❌ Arquivo {caminho} não encontrado.")
-            print("")
-            print("-------------------------------------------------------")
-        return "00000000000", "senha_padrao" # Valores de fallback
-        
-    def escrever_adb(self, nome_campo, texto):
-        """Envia texto para o campo focado via ADB"""
-        logging.info(f"🖊️ Preenchendo {nome_campo}...")
-        print("")
-        print("-------------------------------------------------------")
-        # Primeiro, clicamos no campo para garantir o foco (opcional, dependendo do seu fluxo)
-        # O comando abaixo envia o texto diretamente
-        cmd = f"HD-Adb.exe -s {self.target_device} shell input text {texto}"
-        subprocess.run(cmd, shell=True, capture_output=True)
-        sleep(1) # Delay para o sistema processar a entrada
+            if os.path.exists(caminho_config):
+                path_temp = caminho_config + ".tmp"
+                config_atual["progresso"] = percentual
+                config_atual["msg_status"] = mensagem
+                with open(path_temp, "w", encoding="utf-8") as f:
+                    json.dump(config_atual, f, indent=4)
+                os.replace(path_temp, caminho_config)
+            logging.info(f"📊 Progresso: {percentual}% - {mensagem}")
+        except Exception as e:
+            logging.error(f"Erro ao reportar estado: {e}")
 
     def carregar_config_dashboard(self):
         path_original = os.path.join(DB_DIR, "config_automacao.json")
@@ -177,638 +65,474 @@ class AutomacaoADB:
             return None
 
         try:
-            # 1. Faz uma cópia física do arquivo original para um novo nome
-            # O copy2 é extremamente rápido e não bloqueia o original por muito tempo
             shutil.copy2(path_original, path_copia_trabalho)
-            sleep(0.5)
-            # 2. Agora o robô lê a CÓPIA dele, sem incomodar o Streamlit
+            sleep(0.2)
             if os.path.getsize(path_copia_trabalho) > 0:
-                with open(path_copia_trabalho, "r", encoding='utf-8') as f:
+                with open(path_copia_trabalho, "r", encoding="utf-8") as f:
                     return json.load(f)
         except (json.JSONDecodeError, PermissionError, OSError):
-            # Se mesmo a cópia falhar (ex: o original estava sendo escrito no microssegundo da cópia)
             return None
         return None
-    
-    def iniciar_por_dashboard(self ):
-        """Orquestra o início baseado na escolha do usuário"""
-        path_config = os.path.join(DB_DIR, "config_automacao.json")
-        config = self.carregar_config_dashboard()
-        peso_config = os.path.getsize(path_config)
-        
-        if not config or peso_config == 0:
-            logging.warning("⚠️ Nenhuma configuração encontrada no Dashboard. Usando padrão.")
-            print("")
-            print("-------------------------------------------------------")    
-            return False
 
-        tipo = config["tipo"]
-        qtd = config["quantidade"]
-        
-        # Mapeia a quantidade para o índice do molde (0, 1, 2)
-        # ValeCap: 1(idx 0), 2(idx 1), 4(idx 2)
-        # HiperCap: 2(idx 0), 5(idx 1), 10(idx 2)
-        mapa_indices = {
-            "valecap": {1: 0, 2: 1, 4: 2},
-            "hipercap": {2: 0, 5: 1, 10: 2}
-        }
-        
-        idx_molde = mapa_indices[tipo].get(qtd, 0)
-        
-        logging.info(f"🎯 Iniciando missão: {tipo} com {qtd} títulos (Índice Molde: {idx_molde})")
-        print("")
-        print("-------------------------------------------------------")
-        
-        # Agora executa os passos usando esses dados
-        if self.selecionar_quantidade(tipo, idx_molde):
-            return self.analisar_e_escolher_titulo(config)
-        
-        return False
+    def carregar_credenciais(self) -> tuple[str, str]:
+        try:
+            return get_login_credenciais()
+        except Exception as e:
+            logging.error(f"❌ Erro ao carregar credenciais: {e}")
+            return "", ""
 
+    def realizar_login(self) -> bool:
+        """Verifica se o usuário já está logado via XML; caso contrário, faz login automático."""
+        self.reportar_estado(10, "Verificando login via XML...")
+        logging.info("🔐 Verificando estado de login via XML...")
 
-    def analisar_e_escolher_titulo(self, config_dashboard):
-        
-        tipo_jogo = config_dashboard.get("tipo")
-        qtd_total = config_dashboard.get("quantidade", 1)
-        
-        logging.info(f"🧐 Iniciando análise para: {tipo_jogo} | Qtd: {qtd_total}")
-        print("")
-        print("-"*50)
-        self.reportar_estado(70, f"Configurando checkout para {tipo_jogo}...")
-
-        # 1. ACIONAR "NÚMERO DO TITULO"
-        etapa_n_titulo = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][0]
-        self.garantir_botao_ativo(etapa_n_titulo, "escolher_ativo.PNG", threshold=0.95)
-
-        # 2. SELECIONAR PRODUTO
-        fluxo_pagamento = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"]
-        etapa_produto = next((item for item in fluxo_pagamento if item.get("nome") == tipo_jogo), None)
-        
-        if etapa_produto:
-            self.garantir_botao_ativo(etapa_produto, f"titulo_ativo.PNG", threshold=0.95)
-
-        # 3. ENTRAR NA GRADE E PROCESSAR DINAMICAMENTE
-        etapa_especifico = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]
-        
-        # Abre a grade de títulos
-        if self.executar_passo(etapa_especifico["fluxo"][0]):
-            # Chamar a função que lida com a quantidade e o scroll
-            return self.processar_titulos_dinamico(config_dashboard, etapa_especifico)
-
-    def percorrer_lista_titulos(self, etapa_especifico):
-        """
-        Procura pelos títulos de 1 a 10. Se não encontrar o próximo da lista,
-        rola a tela para baixo até encontrá-lo.
-        """
-        # i vai de 1 a 10
-        for i in range(1, 11):
-            molde_nome = f"titulo{i}_escolher.PNG" # Nome do seu arquivo conforme padrão
-            self.reportar_estado(75, f"Procurando Título {i} de 10...")
-            
-            encontrado = False
-            tentativas_scroll = 0
-            
-            # Tenta encontrar o título atual. Se não achar, dá um scroll e tenta de novo (máx 3 scrolls)
-            while not encontrado and tentativas_scroll < 3:
-                capturar_cartela_android()
-                
-                res, x_ini, y_ini, w, h = match_template_adb(os.path.join(MOLDES_DIR, molde_nome), self.path_ss)
-                
-                if res:
-                    logging.info(f"🎯 Título {i} localizado! Clicando em ({x_ini}, {y_ini})")
-                    print("")
-                    print("-------------------------------------------------------")
-                    clicar_adb(x_ini, y_ini, w, h, random_offset=5)
-                    encontrado = True
-                    
-                    # ENTRA NA ANÁLISE DA CARTELA (Sua lógica de IA)
-                    fluxo_ia = etapa_especifico["fluxo"][1]["escolher_numeros_titulo"]
-                    while True:
-                        sucesso_compra = self.processar_ciclo_ia(fluxo_ia)
-                        
-                        if sucesso_compra:
-                             # Para tudo e finaliza a missão
-                            fluxo_ia_confirma = etapa_especifico["fluxo"][1]["confirmar_titulo"]
-                            self.executar_passo(fluxo_ia_confirma)
-                            sleep(1)
-                            continue
-                            
-                        
-                        elif sucesso_compra is None:
-                            logging.info("Numero de tetativas seguidas atingidos.... aguardando tempo de espera de 5min")
-                            sleep(300) 
-                            continue
-                    # Se não comprou, volta para a lista para procurar o próximo (i + 1)
-                   
-                else:
-                    # Se não achou o título i, provavelmente ele está mais abaixo
-                    logging.info(f"📜 Título {i} não visível. Rolando tela para baixo...")
-                    print("")
-                    print("-"*80)
-                    # Coordenadas de swipe: [X_inicial, Y_inicial, X_final, Y_final, duração]
-                    # Rola de baixo para cima para a lista descer
-                    tentativas_scroll += 1
-                    sleep(1) # Espera a lista parar de balançar
-
-        return False
-
-    def processar_titulos_dinamico(self, config_dashboard, etapa_especifico):
-        """
-        Lógica que se adapta à quantidade escolhida no Dashboard.
-        """
-        qtd_total = config_dashboard.get("quantidade", 1) # Pega 1 como padrão
-        logging.info(f"📋 Iniciando busca para {qtd_total} títulos.")
-
-
-        for i in range(1, qtd_total + 1):
-            molde_nome = f"titulo{i}_escolher.PNG"
-            self.reportar_estado(75, f"Analisando {i} de {qtd_total}...")
-            # Tenta encontrar o título na tela atual
-            sleep(5)
-            capturar_cartela_android()
-            resultado = match_template_adb(os.path.join(MOLDES_DIR, molde_nome), self.path_ss, threshold=0.60)
-            print(resultado)
-            if resultado[0]==False:
-                logging.info(f"📜 Título {i} não visível. Tentando de novo...")
-                
-                sleep(3)
-                clicar_adb(600, 1600, 200, 100, random_offset=10, centro=True)
-                capturar_cartela_android() 
-                resultado = match_template_adb(os.path.join(MOLDES_DIR, molde_nome), self.path_ss, threshold=0.60)
-                print(resultado)
-                print("")
-                print("-"*80)
-                
-            res, x_ini, y_ini, w, h = resultado
-    
-            # Se não achou e a quantidade for alta, tenta o scroll
-            if not res and qtd_total > 5:
-                logging.info(f"📜 Título {i} não visível e a lista é longa. Rolando...")
-                clicar_adb(600, 1600, 200, 100, random_offset=10, centro=True) #remover a gif da mao
-                self.fazer_swipe([700, 1700, 700, 500, 800])
-                sleep(5)
-                clicar_adb(600, 1600, 200, 100, random_offset=10, centro=True) 
-                capturar_cartela_android()
-                res, x_ini, y_ini, w, h = match_template_adb(os.path.join(MOLDES_DIR, molde_nome), self.path_ss)
-
-            if res:
-                print(f"🎯 Título {i} localizado! Clicando em ({x_ini}, {y_ini})")
-                print("")
-                print("-------------------------------------------------------")
-                clicar_adb(x_ini, y_ini+700, w, h, random_offset=5)
-                capturar_cartela_android()
-                # Inicia análise de IA da cartela
-                fluxo_ia = etapa_especifico["fluxo"][1]["escolher_numeros_titulo"]
-                if self.processar_ciclo_ia(fluxo_ia):
-                    return True # Compra efetuada
-            
-            else:
-
-                logging.warning(f"❌ Não foi possível localizar o título {i}")
-                print("")
-                print("-------------------------------------------------------")
-        
-        return False
-    
-    def garantir_botao_ativo(self, etapa, molde_sucesso,threshold=0.85):
-        """Verifica se o botão já está no estado ativo. Se não, clica."""
-        print("")
-        print("----------------------------------------")
-        capturar_cartela_android() # Método que atualiza o self.path_ss
-        print("Verificando estado do botão...")
-        print(f"Caminho do molde de sucesso: {molde_sucesso}")
-        print("----------------------------------------")
-        valores = match_template_adb(os.path.join(MOLDES_DIR, molde_sucesso), self.path_ss, threshold=threshold)
-        print(valores)
-        res, _, _, _, _ = valores
-        print(f"Verificando botão {etapa['nome']} ativo: {res}")
-        
-        if res:
-            logging.info(f"✅ Botão {etapa['nome']} já está ativo.")
-            print("")
-            print("-------------------------------------------------------")
+        tree = dump_ui_xml()
+        if existe_texto_na_tela(["Seu saldo", "Olá "], tree=tree, contem=True):
+            logging.info("✅ Usuário já está logado.")
+            self.reportar_estado(25, "Login confirmado. Acessando área de compra...")
             return True
-        else:
-            logging.info(f"skipping: Botão {etapa['nome']} inativo. Ativando...")
-            print("")
-            print("-------------------------------------------------------")
-            self.executar_passo(etapa)
-            sleep(1)
+
+        if not clicar_por_texto(["Acessar conta", "Acesse sua conta"], timeout=10, contem=False, delay_pos=2.0):
+            logging.error("❌ Botão 'Acessar conta' não encontrado no XML.")
             return False
 
-    def confirmacao_estado(self, etapa, molde_sucesso,threshold=0.85) -> bool:
-        """Verifica estatus do molde. Se sim retornar true se nao false."""
-        print("")
-        print("----------------------------------------")
-        capturar_cartela_android() # Método que atualiza o self.path_ss
-        print("Verificando estado...")
-        print(f"Caminho do molde de sucesso: {molde_sucesso}")
-        print("----------------------------------------")
-        valores = match_template_adb(os.path.join(MOLDES_DIR, molde_sucesso), self.path_ss, threshold=threshold)
-        print(valores)
-        res, _, _, _, _ = valores
-        print(f"Localizando imagem {etapa['nome']} status: {res}")
-        
-        if res:
-            logging.info(f"✅ Botão {etapa['nome']} já está encontrado.")
-            print("")
-            print("-------------------------------------------------------")
+        self.reportar_estado(20, "Preenchendo CPF e senha...")
+        cpf, senha = self.carregar_credenciais()
+        if not cpf or not senha:
+            logging.error("❌ CPF/Senha vazios. Configure VALECAP_CPF e VALECAP_SENHA no .env.")
+            return False
+
+        if not clicar_por_texto("Número do CPF", timeout=8, classe="EditText", delay_pos=0.8):
+            logging.error("❌ Campo CPF não encontrado.")
+            return False
+        escrever_texto_adb(cpf)
+
+        if not clicar_por_texto("Senha de acesso", timeout=8, classe="EditText", delay_pos=0.8):
+            logging.error("❌ Campo Senha não encontrado.")
+            return False
+        escrever_texto_adb(senha)
+
+        if not clicar_por_texto(["Acessar", "Entrar"], timeout=8, delay_pos=4.0):
+            logging.error("❌ Botão 'Acessar' não encontrado.")
+            return False
+
+        if existe_texto_na_tela(["Seu saldo", "Olá "], contem=True):
+            logging.info("✅ Login realizado com sucesso via XML!")
+            self.reportar_estado(30, "Login realizado. Acessando área de compra...")
             return True
-        else:
-            logging.info(f"Imagem {etapa['nome']} não encontrada.")
-            print("")
-            print("-------------------------------------------------------")
+
+        logging.warning("⚠️ Login enviado, mas confirmação 'Seu saldo' não apareceu ainda.")
+        return True
+
+    def entrar_area_compra(self) -> bool:
+        """Navega da Home para a tela de Carrinho/Compra via XML."""
+        self.reportar_estado(35, "Abrindo Participe e Concorra...")
+        return clicar_por_texto("Participe e Concorra", timeout=10, delay_pos=2.5)
+
+    def selecionar_quantidade(self, tipo_cap: str = "valecap", qtd: int = 1) -> bool:
+        """Seleciona a quantidade desejada (ex: 'Quero 1', 'Quero 2', 'Quero 4') e clica em Continuar."""
+        self.reportar_estado(45, f"Selecionando {qtd} título(s) ({tipo_cap})...")
+        if not clicar_por_texto(f"Quero {qtd}", timeout=10, delay_pos=1.5):
+            logging.error(f"❌ Botão 'Quero {qtd}' não encontrado.")
             return False
 
+        self.reportar_estado(55, "Avançando para o pedido...")
+        return clicar_por_texto("Continuar", timeout=10, delay_pos=2.5)
 
-    def processar_ciclo_ia(self, etapa_config):
-        conf = etapa_config["config"]
-        etapa_selecao_cartela = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]["fluxo"][1]['escolher_numeros_titulo']
-        etapa_aviso = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]["fluxo"][1]["tela_aviso"]
-        etapa_entendi = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]["fluxo"][1]["tela_aviso_entendi"]
-        print(etapa_selecao_cartela)
-        tentativas = 0
-        print("")
-        print("")
-        print("Iniciando ciclo de análise IA para a cartela...")
-        print("Configurações:")
-        print(f" - Limite de Tentativas: {conf['limite_tentativas']}")
-        print(f" - Delay em caso de bloqueio: {conf['delay_bloqueio']}s")  
-        print("Analisando cartelas...")
-        print("Usando OCR + Agente DeepSeek/RAG para decisão...")
-        print("----------------------------------------")
-        print("")
-        print("")
-        clicar_adb(600, 1600, 200, 100, random_offset=10, centro=True) # Clica em ESCOLHER NÚMERO DO TÍTULO
-        falhas_leitura_seguidas = 0
-        while tentativas < conf["limite_tentativas"]:
-            capturar_cartela_android()
-            print("Verificando avisos na tela...")
-            print(f"etapa_aviso.get('molde'): {etapa_aviso.get('molde')}")
-            print(" ----------------------------------------")
-            if self.confirmacao_estado(etapa_selecao_cartela, "atualizando_cartela.PNG", threshold=0.90):
-                sleep(1)
-                logging.info("⏳ Cartela atualizando. Aguardando...")
-                print("")
-                print("-------------------------------------------------------")
-                clicar_adb(600, 1600, 200, 100, random_offset=10, centro=True)
-                sleep(10)
-                clicar_adb(800, 1600, 200, 100, random_offset=10, centro=True)
-            # 1. Verificação de Bloqueio/Aviso (Aviso de carregar títulos)
-            
-            elif any(self.detectar_aviso(m) for m in etapa_aviso.get("moldes")) :
-                for m in etapa_aviso.get("moldes"):
-                    if m in "limite_de_escolha.PNG":
-                        self.executar_passo(etapa_entendi)
-                        sleep(conf['delay_bloqueio'])
-
-                    elif m in "aviso_muitas_pessoas.PNG":
-                        self.executar_passo(etapa_entendi)
-                        sleep(conf['delay_bloqueio'])
-
-                    _resp,_,_,_,_ = match_template_adb(os.path.join(MOLDES_DIR,m), self.path_ss)
-                    if _resp:
-                        logging.warning(f"⏳ Aviso. \n {m.replace(".PNG",'')} \nAguardando {conf['delay_bloqueio']}s")
-                    for m in etapa_entendi.get("moldes"):  
-                        resp,x,y,w,h = match_template_adb(os.path.join(MOLDES_DIR,m), self.path_ss)
-                        if resp:
-                            clicar_adb(x,y,w,h)
-                print("")
-                print("-------------------------------------------------------")
-                sleep(conf['delay_bloqueio'])
-                continue
-
-            # 2. OCR e IA (Análise da cartela visível)
-            self.reportar_estado(85, f"Analisando cartela {tentativas+1}...")
-            dados_ocr = image_read.imagem_ajuste(self.path_ss, "cartela_atual.png")
-            print("")
-            print("Dados OCR da cartela atual:")
-            print(dados_ocr)
-            print("")
-
-            try:
-                if dados_ocr.get('status') == 'sucesso':
-                    # Aqui você chama o seu agente DeepSeek/RAG para dar a nota
-                    decisao = self.gerir_decisao_cartela(dados_ocr, conf)
-                    
-                    falhas_leitura_seguidas = 0 # Reseta falhas
-                                    
-                    if decisao == "COMPRAR":
-                        logging.info("🔥 CARTELA ENCONTRADA! Selecionando...")
-                        logging.info("aguardando confirmacao do Streamlit...")
-                        print("")
-                        print("-------------------------------------------------------")
-                        # Clica na âncora da cartela para confirmar seleção
-                        self.executar_passo(etapa_config) 
-                        
-                        return True
-                
-                # 3. Se não for boa, Swipe para a próxima
-                elif dados_ocr.get('status') == 'alerta_falha_leitura':
-                    logging.warning("⚠️ Falha na leitura possivel cartela vazia...")
-                    print("")
-                    print("-------------------------------------------------------")
-                    falhas_leitura_seguidas +=1
-                    if falhas_leitura_seguidas > 5:
-                        logging.error("Multiplas falhas de leituras da cartela, encerrando programa...")
-                        break
-
-                    continue
-                elif len(dados_ocr) == 0:
-                    logging.warning("⚠️ Dados OCR vazios. Tentando novamente...") 
-                    print("")
-                    print("-------------------------------------------------------")
-                    continue
-
-            except (AttributeError, Exception) as e:
-                logging.error(f"❌ Erro ao processar dados OCR: {e}")
-                logging.warning("⚠️ Dados OCR inválidos. Tentando novamente...")
-                print("")
-                print("-------------------------------------------------------")
-                tentativas += 1
-                continue
-
-            logging.info(f"👎 Cartela {tentativas+1} abaixo da nota. Próxima...")
-            print("")
-            print("-------------------------------------------------------")
-            self.fazer_swipe(conf["swipe_coords"])
-            tentativas += 1
-            sleep(1.2) # Delay para animação do app
-            
-        logging.error("❌ Limite de tentativas atingido sem encontrar cartela boa.")
-        print("")
-        print("-------------------------------------------------------")
+    def _rolar_modal_ate_visivel(self, texto: str, contem: bool = True, max_y: int = 2120, max_scrolls: int = 5):
+        """Rola o modal 'Complete seu pedido' até que o elemento fique acima do rodapé fixo."""
+        for _ in range(max_scrolls):
+            tree = dump_ui_xml()
+            no = encontrar_no_xml(tree, texto, contem=contem, max_y=max_y)
+            if no is not None:
+                return no
+            swipe_adb(720, 2050, 720, 1650, 400)
+            sleep(1.2)
         return None
 
-    def gerir_decisao_cartela(self, dezenas_lidas, config):
-        # 1. Calcula a estatística primeiro
-        conf = config
-        titulo = dezenas_lidas.get('titulo', [])
-        dezenas = dezenas_lidas.get('dezenas', [])
-        print(f"As dezenas coletadas foram: {dezenas}")
-        
+    def iniciar_por_dashboard(self) -> bool:
+        """Orquestra o fluxo completo baseado na configuração gravada pelo Streamlit."""
+        config = self.carregar_config_dashboard()
+        if not config:
+            logging.warning("⚠️ Nenhuma configuração encontrada no Dashboard.")
+            return False
+
+        tipo = config.get("tipo", "valecap")
+        qtd = int(config.get("quantidade", 1))
+        logging.info(f"🎯 Iniciando missão via XML: {tipo} | {qtd} título(s)")
+
+        if not self.selecionar_quantidade(tipo, qtd):
+            return False
+
+        return self.analisar_e_escolher_titulos(tipo, qtd)
+
+    def analisar_e_escolher_titulos(self, tipo_jogo: str, qtd_total: int) -> bool:
+        """Abre a seção 'Número do titulo', seleciona o produto e analisa cada título via XML + RAG."""
+        self.reportar_estado(65, f"Abrindo escolha de títulos ({tipo_jogo})...")
+
+        # 1. Expande 'Número do titulo' (se ainda estiver recolhido com 'Ver mais')
+        no_num = self._rolar_modal_ate_visivel("Número do titulo", contem=True)
+        if no_num is None:
+            logging.error("❌ Seção 'Número do titulo' não encontrada no modal.")
+            return False
+
+        tree_atual = dump_ui_xml()
+        if existe_texto_na_tela("Ver mais", tree=tree_atual, contem=False):
+            _, _, _, _, cx, cy = parse_bounds(no_num.attrib["bounds"])
+            tap_adb(cx, cy, random_offset=5)
+            sleep(2.0)
+
+        # 2. Abre o grupo do produto ('Vale Cap, X titulo para escolher' / 'Hiper...')
+        alvo_produto = "titulo para escolher"
+        no_prod = self._rolar_modal_ate_visivel(alvo_produto, contem=True)
+        if no_prod is None:
+            logging.error("❌ Opção 'titulo para escolher' não encontrada.")
+            return False
+
+        _, _, _, _, cx, cy = parse_bounds(no_prod.attrib["bounds"])
+        tap_adb(cx, cy, random_offset=5)
+        sleep(2.0)
+
+        # 3. Percorre os títulos (1..qtd_total) clicando em 'Escolher número'
+        for i in range(1, qtd_total + 1):
+            self.reportar_estado(75, f"Abrindo seleção do título {i} de {qtd_total}...")
+            no_escolher = self._rolar_modal_ate_visivel("Escolher número", contem=True)
+            if no_escolher is None:
+                logging.error(f"❌ Botão 'Escolher número' não encontrado para o título {i}.")
+                return False
+
+            _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
+            tap_adb(cx, cy, random_offset=5)
+            sleep(3.0)
+
+            aprovado = self.processar_ciclo_ia(titulo_idx=i, qtd_total=qtd_total)
+            if not aprovado:
+                logging.warning(f"⚠️ Título {i} não foi confirmado.")
+                return False
+
+        return True
+
+    def _extrair_texto_aviso(self, tree) -> str:
+        """Extrai o texto legível do modal de aviso/espera no XML."""
+        partes = []
+        for el in tree.iter("node"):
+            if "TextView" not in el.attrib.get("class", ""):
+                continue
+            t = el.attrib.get("text", "").strip()
+            if t and not (len(t) == 1 and ord(t) > 50000):
+                if any(p in t.lower() for p in ("limite", "muitas pessoas", "aguarde", "imprevisto", "minuto", "espera", "tente")):
+                    partes.append(t)
+        return " | ".join(dict.fromkeys(partes)) or "Aviso de limite/espera"
+
+    def _tratar_avisos_xml(self, tree, cartelas_ate_aviso: int) -> bool:
+        """
+        Detecta pop-ups de limite/espera no XML, registra quantas cartelas foram lidas
+        até o bloqueio e mede o tempo real necessário até o app liberar novamente.
+        """
+        if not existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree, contem=True):
+            return False
+
+        texto_aviso = self._extrair_texto_aviso(tree)
+        inicio_ts = datetime.now()
+        t0 = time()
+        delay_max = int(self.config_ia.get("delay_bloqueio", 900))
+
+        logging.warning(
+            f"⏳ AVISO DE ESPERA após {cartelas_ate_aviso} cartelas! "
+            f"Texto: '{texto_aviso}' | Monitorando tempo real de liberação..."
+        )
+        self.reportar_estado(
+            80,
+            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Medindo tempo de espera...",
+        )
+        self.telegram.enviar_mensagem(
+            f"⏳ <b>Aviso de espera detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
+            f"Mensagem: <i>{texto_aviso}</i>\nMonitorando tempo até liberar..."
+        )
+
+        clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
+
+        # Sonda a cada 20s até a tela voltar a aceitar troca de cartela sem novo aviso
+        intervalo_sonda = 20
+        tempo_espera_s = 0
+        while True:
+            sleep(intervalo_sonda)
+            tempo_espera_s = int(time() - t0)
+            self.reportar_estado(
+                80,
+                f"⏳ Em espera há {tempo_espera_s}s (após {cartelas_ate_aviso} cartelas)...",
+            )
+
+            # Tenta avançar uma cartela para testar se o limite já foi liberado
+            swipe_adb(1250, 990, 200, 990, 400)
+            sleep(1.5)
+            tree_sonda = dump_ui_xml()
+            if tree_sonda is None:
+                continue
+
+            if existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree_sonda, contem=True):
+                clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=4, contem=True, delay_pos=1.0)
+                if tempo_espera_s >= delay_max:
+                    logging.warning(f"⏰ Tempo máximo ({delay_max}s) atingido ainda sob aviso.")
+                    break
+                continue
+
+            dados_teste = extrair_cartela_xml(tree_sonda)
+            if dados_teste.get("status") == "sucesso":
+                logging.info(f"✅ Seleção liberada novamente após {tempo_espera_s}s!")
+                break
+
+        salvar_log_limite_espera(
+            timestamp_aviso=inicio_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            cartelas_ate_aviso=cartelas_ate_aviso,
+            tempo_espera_s=tempo_espera_s,
+            texto_aviso=texto_aviso,
+        )
+        self.telegram.enviar_mensagem(
+            f"✅ <b>Seleção liberada!</b>\n"
+            f"Cartelas antes do aviso: <b>{cartelas_ate_aviso}</b>\n"
+            f"Tempo real de espera: <b>{tempo_espera_s}s</b> ({tempo_espera_s / 60:.1f} min)"
+        )
+        return True
+
+    def processar_ciclo_ia(self, titulo_idx: int = 1, qtd_total: int = 1) -> bool:
+        """Lê cartelas via XML, avalia com Monte Carlo RAG e troca por swipe até aprovar."""
+        limite_tentativas = int(self.config_ia.get("limite_tentativas", 100))
+        tentativas = 0
+        cartelas_ate_aviso = 0
+        falhas_seguidas = 0
+        ultimo_titulo = None
+
+        logging.info(f"🚀 Iniciando análise de cartelas via XML + Monte Carlo RAG (Título {titulo_idx}/{qtd_total})...")
+
+        while tentativas < limite_tentativas:
+            tree = dump_ui_xml()
+            if tree is None:
+                falhas_seguidas += 1
+                if falhas_seguidas > 5:
+                    logging.error("❌ Múltiplas falhas ao ler XML da tela.")
+                    return False
+                sleep(1.5)
+                continue
+
+            if self._tratar_avisos_xml(tree, cartelas_ate_aviso):
+                cartelas_ate_aviso = 0
+                continue
+
+            self.reportar_estado(
+                85,
+                f"Analisando cartela #{cartelas_ate_aviso + 1} (Título {titulo_idx}/{qtd_total})...",
+            )
+            dados_cartela = extrair_cartela_xml(tree)
+            logging.info(f"🎴 Cartela XML: Título={dados_cartela['titulo']} | Dezenas={dados_cartela['dezenas']}")
+
+            if dados_cartela.get("status") != "sucesso":
+                falhas_seguidas += 1
+                # Se houver overlay da mãozinha ("arraste para o lado"), um toque na tela dispensa o overlay
+                logging.warning(f"⚠️ Leitura incompleta ({len(dados_cartela['dezenas'])} dezenas). Tocando na tela para dispensar overlay...")
+                tap_adb(720, 990, random_offset=10)
+                if falhas_seguidas > 5:
+                    logging.error("❌ Múltiplas falhas consecutivas na leitura da cartela.")
+                    return False
+                sleep(1.5)
+                continue
+
+            falhas_seguidas = 0
+            if dados_cartela["titulo"] != ultimo_titulo:
+                cartelas_ate_aviso += 1
+                ultimo_titulo = dados_cartela["titulo"]
+
+            decisao = self.gerir_decisao_cartela(dados_cartela)
+
+            if decisao == "COMPRAR":
+                logging.info("🔥 CARTELA APROVADA! Confirmando título via XML...")
+                clicar_por_texto(
+                    ["Confirmar e escolher próximo", "Confirmar e finalizar", "Confirmar"],
+                    timeout=10,
+                    contem=True,
+                    delay_pos=2.0,
+                )
+                return True
+
+            # Desliza a cartela para a esquerda para carregar a próxima opção
+            logging.info(f"👎 Cartela #{cartelas_ate_aviso} descartada. Arrastando para a próxima...")
+            swipe_adb(1250, 990, 200, 990, 400)
+            tentativas += 1
+            sleep(1.2)
+
+        logging.warning("❌ Limite de tentativas atingido sem aprovação.")
+        return False
+
+    def gerir_decisao_cartela(self, dados_cartela: dict) -> str:
+        """Executa Monte Carlo ponderado pelo RAG, filtra cartelas frias e consulta o usuário (Streamlit + Telegram)."""
+        titulo = dados_cartela.get("titulo", "desconhecido")
+        dezenas = dados_cartela.get("dezenas", [])
+
         try:
-            print("")
-            print("-"*50)
-            print("")
-            logging.info("📊 Calculando probabilidades de Monte Carlo...")
-            print("")
-            print("-"*50)
-            print("")
-
-            if len(dezenas) < 20:
-                logging.error("❌ Dezenas insuficientes para análise.")
+            if len(dezenas) != 20:
                 return "PROXIMA"
-            
-            stats = self.agente.testar_rag(titulo, dezenas)
 
-            
-            
-            media = stats.get('media', 60)
-            
-            # 2. FILTRO AUTOMÁTICO: Se a média for ruim, nem avisa o dashboard
-            if media > 57.6:
-                print("")
-                print("-"*50)
-                print("")
-                logging.info(f"🚫 Cartela FRIA ({media:.2f}). Descartando automaticamente...")
-                print("")
-                print("-"*50)
-                print("")
-                self.fazer_swipe(conf["swipe_coords"])
-                sleep(2)
-                return "PROXIMA" 
+            stats = self.rag.simular_monte_carlo(dezenas_cartela=dezenas)
+            media = stats.get("media", 60.0)
+            media_corte = float(self.config_ia.get("media_corte", 57.6))
 
-            
-            # 3. Se passou no filtro, envia para o Dashboard e TRAVA para decisão humana
-            print("")
-            print("-"*50)
-            print("")
-            logging.info(f"🔥 Cartela BOA encontrada ({media:.2f})! Aguardando decisão no Streamlit...")
-            print("")
-            print("-"*50)
-            print("")
+            if media > media_corte:
+                salvar_log_decisao(titulo, dezenas, stats, "Rejeitado_IA")
+                logging.info(f"🚫 Cartela FRIA (Média RAG: {media:.2f} > {media_corte}). Descartando...")
+                return "PROXIMA"
+
+            logging.info(
+                f"🔥 Cartela BOA encontrada (Título {titulo} | Média RAG: {media:.2f} | "
+                f"Score: {stats.get('weighted_score', 0):.1f})! Aguardando decisão (Streamlit ou Telegram)..."
+            )
             self.comunicar_dashboard({"titulo": titulo, "dezenas": dezenas}, stats)
-            
-            # Loop de espera (Bloqueia o robô até você clicar no site)
+            self.telegram.enviar_cartela_aprovacao(titulo, dezenas, stats)
+
+            caminho_json = os.path.join(DB_DIR, "comunicacao_app.json")
             while True:
-                sleep(2)
-                caminho_json = os.path.join(DB_DIR, "comunicacao_app.json")
+                sleep(1.5)
+                # 1. Verifica decisão pelo Telegram (celular)
+                decisao_tg = self.telegram.verificar_decisao(titulo)
+                if decisao_tg in ("ACEITO", "DESISTIDO"):
+                    if os.path.exists(caminho_json):
+                        os.remove(caminho_json)
+                    if decisao_tg == "ACEITO":
+                        salvar_log_decisao(titulo, dezenas, stats, "Comprado_Telegram")
+                        return "COMPRAR"
+                    salvar_log_decisao(titulo, dezenas, stats, "Desistido_Telegram")
+                    return "PROXIMA"
+
+                # 2. Verifica decisão pelo Dashboard Streamlit
                 if os.path.exists(caminho_json):
-                    with open(caminho_json, "r") as f:
+                    with open(caminho_json, "r", encoding="utf-8") as f:
                         dados = json.load(f)
-                    
+
                     if dados.get("status") == "ACEITO":
+                        salvar_log_decisao(titulo, dezenas, stats, "Comprado")
+                        os.remove(caminho_json)
+                        self.telegram.enviar_mensagem(f"✅ Título <code>{titulo}</code> aprovado pelo Dashboard!")
                         return "COMPRAR"
                     if dados.get("status") == "DESISTIDO":
-                        # Limpa o JSON para o dashboard saber que acabou
+                        salvar_log_decisao(titulo, dezenas, stats, "Desistido_Usuario")
                         os.remove(caminho_json)
+                        self.telegram.enviar_mensagem(f"❌ Título <code>{titulo}</code> descartado pelo Dashboard.")
                         return "PROXIMA"
 
         except Exception as e:
-            print("")
-            print("-"*50)
-            print("")
-            logging.error(f"❌ Erro crítico na análise: {e}")
-            print("")
-            print("-"*50)
-            print("")
+            logging.error(f"❌ Erro crítico na análise da cartela: {e}")
             return "PROXIMA"
 
-    def fazer_swipe(self, coords):
-        try:
-            clicar_adb(400,1600,50,50,centro=True)
-
-            cmd = f"HD-Adb.exe -s {self.target_device} shell input swipe {str(coords[0])} {str(coords[1])} {str(coords[2])} {str(coords[3])} {str(coords[4])}"
-            sleep(0.5)
-            subprocess.run(cmd, shell=True, check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Erro ao executar swipe ADB: {e}")
-            print("")
-            print("-------------------------------------------------------")
-
-    def detectar_aviso(self, molde):
-        return match_template_adb(os.path.join(MOLDES_DIR, molde), self.path_ss)[0]
-
-    def fluxo_pagamento_completo(self):
-        """Percorre toda a lista de pagamento definida no config.py"""
-        logging.info("🚀 Iniciando fluxo de pagamento...")
-        
-        fluxo = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"]
-        
-        for etapa in fluxo:
-            logging.info(msg=f"🔄 Processando etapa: {etapa['nome']}")
-            print("")
-            print("-------------------------------------------------------")
-            resultado = self.executar_passo(etapa)
-            
-            if not resultado:
-                logging.error(f"🛑 Falha crítica na etapa {etapa['nome']}. Abortando.")
-                print("")
-                print("-------------------------------------------------------")
-                return False
-            
-            sleep(1.5) # Delay entre cliques para o app processar
-            
-        logging.info("🏆 Fluxo de pagamento concluído com sucesso!")
-        print("")
-        print("-------------------------------------------------------")
-        return True
-
-    def selecionar_quantidade(self, tipo_cap="valecap", qtd_index=0):
-        """
-        tipo_cap: 'valecap' ou 'hipercap'
-        qtd_index: 0 para a primeira opção, 1 para a segunda, 2 para a terceira
-        """
-        dados = ARVORE_DECISAO["CARRINHO"]["selecao_quantidade"][tipo_cap]
-        
-        # Tenta clicar na quantidade desejada
-        passo_qtd = {
-            "nome": f"Quantidade {tipo_cap}",
-            "moldes": [dados["moldes"][qtd_index]],
-            "acao": "clicar"
-        }
-        
-        if self.executar_passo(passo_qtd, treshold=0.95):
-            # Clica em continuar
-            continuar = ARVORE_DECISAO["CARRINHO"]["selecao_quantidade"]["continuar"]
-            self.reportar_estado(50, f"Selecionar {tipo_cap}...")
-            return self.executar_passo(continuar)
-        return False
-
-    def comunicar_dashboard(self, dados_cartela, stats):
+    def comunicar_dashboard(self, dados_cartela: dict, stats: dict) -> None:
         caminho_temp = os.path.join(DB_DIR, "comunicacao_app.json")
         payload = {
             "timestamp": datetime.now().isoformat(),
             "id_cartela": dados_cartela.get("titulo", "desconhecido"),
             "dezenas": dados_cartela.get("dezenas", []),
-            "media": stats.get('media'),
-            "prob_50": stats.get('prob_50'),
-            "prob_55": stats.get('prob_55'),
-            "monte_carlo_data": stats.get('monte_carlo_data'), # Essencial para o gráfico!
-            "status": "aguardando_aprovacao"
+            "media": stats.get("media"),
+            "media_pura": stats.get("media_pura"),
+            "ganho_rag": stats.get("ganho_rag"),
+            "prob_50": stats.get("prob_50"),
+            "prob_55": stats.get("prob_55"),
+            "pure_score": stats.get("pure_score"),
+            "weighted_score": stats.get("weighted_score"),
+            "resumo_dezenas": stats.get("resumo_dezenas", {}),
+            "monte_carlo_data": stats.get("monte_carlo_data"),
+            "status": "aguardando_aprovacao",
         }
-        with open(caminho_temp, 'w') as f:
+        with open(caminho_temp, "w", encoding="utf-8") as f:
             json.dump(payload, f)
 
 
-def abrir_app() -> None:
-    pyautogui.click(x=676,y=1060, clicks=1, button='left')
-    sleep(40)
- 
+def salvar_log_limite_espera(timestamp_aviso: str, cartelas_ate_aviso: int, tempo_espera_s: int, texto_aviso: str):
+    """Registra quantas cartelas foram lidas até o aviso de espera e quanto tempo levou para liberar."""
+    arquivo = os.path.join(DB_DIR, "log_limites_espera.csv")
+    df = pd.DataFrame([{
+        "Timestamp_Aviso": timestamp_aviso,
+        "Cartelas_Ate_Aviso": cartelas_ate_aviso,
+        "Tempo_Espera_Segundos": tempo_espera_s,
+        "Tempo_Espera_Minutos": round(tempo_espera_s / 60.0, 2),
+        "Texto_Aviso": texto_aviso,
+    }])
+    if not os.path.exists(arquivo):
+        df.to_csv(arquivo, index=False, sep=";")
+    else:
+        df.to_csv(arquivo, mode="a", header=False, index=False, sep=";")
+
+
 def salvar_log_decisao(id_ref, dezenas, scores, decisao):
-    """Gera o CSV de aprendizado conforme planejado"""
+    """Gera o CSV de aprendizado/auditoria de decisões."""
     data_str = datetime.now().strftime("%Y-%m-%d")
     arquivo = os.path.join(DB_DIR, f"{data_str}_log_decisoes.csv")
-    
+
     novo_log = {
         "ID_Cartela": id_ref,
         "Dezenas": str(dezenas),
-        "Pure_Score": scores['pure_score'],
-        "Weighted_Score": scores['weighted_score'],
+        "Pure_Score": scores["pure_score"],
+        "Weighted_Score": scores["weighted_score"],
         "Decisao": decisao,
-        "Hora": datetime.now().strftime("%H:%M:%S")
+        "Hora": datetime.now().strftime("%H:%M:%S"),
     }
-    
+
     df = pd.DataFrame([novo_log])
-    # Se o arquivo não existe, cria com cabeçalho, senão anexa
     if not os.path.exists(arquivo):
-        df.to_csv(arquivo, index=False, sep=';')
+        df.to_csv(arquivo, index=False, sep=";")
     else:
-        df.to_csv(arquivo, mode='a', header=False, index=False, sep=';')
+        df.to_csv(arquivo, mode="a", header=False, index=False, sep=";")
 
-
-def janela_bluestack() -> list:
-    janela_ativa = gerenciador.janela_esta_ativa(titulo_ou_parte="bluestacks")
-    print(f"status janela_ativa: {janela_ativa[0]} e {janela_ativa[1].title}")
-    if not janela_ativa[0]:
-        print("A janela BlueStacks não está ativa.")
-        janela = gerenciador.encontrar_janelas(titulo_ou_parte="bluestacks")
-        print(f"status da janela: {janela}")
-        if not janela:
-            print("A janela BlueStacks não foi encontrada.")
-            return janela
-    sucesso = gerenciador.esperar_janela(titulo_ou_parte="bluestacks", timeout=60)
-
-    return sucesso
 
 def limparFotos():
     if not os.path.exists(SS_DIR):
-        return
-    
-    os.chdir(path=SS_DIR)
+        return False
+
     for item in os.listdir(SS_DIR):
-        # Forma correta de verificar extensão
-        if item.lower().endswith(".png"):
+        if item.lower().endswith((".png", ".xml")):
             try:
-                os.remove(item)
+                os.remove(os.path.join(SS_DIR, item))
             except Exception as e:
                 print(f"Erro ao deletar {item}: {e}")
-
-    os.chdir(path=PROJECT_ROOT)    
     return True
 
-# O script principal ficaria muito mais curto:
+
 def main():
-    print("")
-    print("-------------------------------------------------------")
-    print("VERIFICANDO APP ABERTO...")
-    while True:
-        sleep(2)
-        appAberto = janela_bluestack()
-        if appAberto:
-            break
-        print("Abrindo app...")
-        abrir_app()
-        sleep(5)
-    
-    # 1. Carregar sua API e Agente (Ajuste o caminho conforme seu projeto)
-    try:
-        with open("src/api_deepseek.txt", "r") as f:
-            api_key = f.read().strip().replace('"', '')
-        from agente import AgenteSorteiosDeepSeek
-        agente_instanciado = AgenteSorteiosDeepSeek(api_key=api_key)
-    except Exception as e:
-        logging.error(f"Falha ao iniciar agente: {e}")
-        print("")
-        print("-------------------------------------------------------")
+    logging.info("🔌 Conectando ao dispositivo Android via ADB (100% XML + segundo plano)...")
+    if not garantir_conexao_adb(timeout=120):
+        logging.error("❌ Não foi possível conectar ao BlueStacks via ADB.")
         return
 
-    # 2. Instanciar o Robô
-    robo = AutomacaoADB(agente_instanciado)
+    abrir_app_android()
 
-    # 3. Fluxo de Execução
-    logging.info("🚀 Iniciando Motor de Automação...")
-    print("")
-    print("-------------------------------------------------------")
+    try:
+        rag_sorteios = SorteioRAG(caminho_base=RAG_DIR)
+        avancadas = rag_sorteios.memoria.get("metricas_avancadas", {})
+        if rag_sorteios.memoria.get("objetos_sorteio") and "tendencias" not in avancadas:
+            rag_sorteios._recalcular_e_salvar()
+    except Exception as e:
+        logging.error(f"Falha ao iniciar motor RAG local: {e}")
+        return
+
+    robo = AutomacaoADB(rag_sorteios)
+    logging.info("🚀 Motor de Automação XML pronto e aguardando comando do Dashboard...")
+
     while True:
-
         config = robo.carregar_config_dashboard()
-
-        print(config)
-
         if config is None:
             sleep(1)
             continue
 
-        if config and config.get("status") == "PROCESSANDO":
+        if config.get("status") == "PROCESSANDO":
             logging.info("⚡ Comando de início detectado pelo Dashboard!")
-            
-            # 1. Realiza Login
-            if robo.realizar_login():
-                # 2. Vai para tela de compra
-                if robo.executar_passo(ARVORE_DECISAO["HOME"]["participe_concorra"]):
-                    # 3. Usa a lógica dinâmica baseada no Expander
-                    robo.iniciar_por_dashboard()                    
-                    logging.info("✅ Missão concluída com sucesso!")
-                    
-            # Reseta o status para não entrar em loop infinito
+
+            if robo.realizar_login() and robo.entrar_area_compra():
+                robo.iniciar_por_dashboard()
+                logging.info("✅ Missão concluída!")
+
             config["status"] = "CONCLUIDO"
-            with open(os.path.join(DB_DIR, "config_automacao.json"), "w") as f:
-                json.dump(config, f)
-            if config.get("status") == "CONCLUIDO":
-                break
-        
+            config["progresso"] = 100
+            config["msg_status"] = "Concluído"
+            with open(os.path.join(DB_DIR, "config_automacao.json"), "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+            break
+
         sleep(3)
 
 

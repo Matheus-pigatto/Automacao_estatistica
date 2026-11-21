@@ -1,15 +1,122 @@
 # config.py na raiz do projeto
 import sys
 import os
-
-from pandas.tests.dtypes.test_inference import MockNumpyLikeArray
+import shutil
+import logging
 
 # Configurações do projeto
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__).removesuffix('src\\config.py'))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
 DB_DIR = os.path.join(PROJECT_ROOT, 'db')
 SS_DIR = os.path.join(DB_DIR, 'ss')
 MOLDES_DIR = os.path.join(DB_DIR, 'moldes')
+RAG_DIR = os.path.join(DB_DIR, 'RAG')
+PDF_DIR = os.path.join(DB_DIR, 'pdf_cartelas')
+
+
+def carregar_env() -> None:
+    """Carrega variáveis do arquivo .env na raiz do projeto (com ou sem python-dotenv)."""
+    caminho_env = os.path.join(PROJECT_ROOT, '.env')
+    if not os.path.exists(caminho_env):
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(caminho_env, override=False)
+        return
+    except ImportError:
+        pass
+
+    with open(caminho_env, 'r', encoding='utf-8') as f:
+        for linha in f:
+            linha = linha.strip()
+            if not linha or linha.startswith('#') or '=' not in linha:
+                continue
+            chave, valor = linha.split('=', 1)
+            chave = chave.strip()
+            valor = valor.strip().strip('"').strip("'")
+            os.environ.setdefault(chave, valor)
+
+
+carregar_env()
+
+
+def resolver_adb_bin() -> str:
+    """Resolve o executável ADB (env ADB_BIN -> BlueStacks HD-Adb.exe -> adb no PATH)."""
+    env_bin = os.getenv('ADB_BIN', '').strip()
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+
+    candidatos = [
+        shutil.which('HD-Adb.exe'),
+        shutil.which('adb'),
+        r'C:\Program Files\BlueStacks_polar\HD-Adb.exe',
+        r'C:\Program Files\BlueStacks_nxt\HD-Adb.exe',
+        r'C:\Program Files (x86)\BlueStacks_nxt\HD-Adb.exe',
+        r'D:\Program Files\BlueStacks_nxt\HD-Adb.exe',
+    ]
+    for cand in candidatos:
+        if cand and os.path.exists(cand):
+            return cand
+    return 'HD-Adb.exe'
+
+
+def resolver_tesseract_cmd() -> str:
+    """Resolve o executável Tesseract (env TESSERACT_CMD -> PATH -> caminhos padrão Windows)."""
+    env_cmd = os.getenv('TESSERACT_CMD', '').strip()
+    if env_cmd and os.path.exists(env_cmd):
+        return env_cmd
+
+    candidatos = [
+        shutil.which('tesseract'),
+        r'D:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+    ]
+    for cand in candidatos:
+        if cand and os.path.exists(cand):
+            return cand
+    return 'tesseract'
+
+
+ADB_BIN = resolver_adb_bin()
+ADB_DEVICE = os.getenv('ADB_DEVICE', '127.0.0.1:6610').strip() or '127.0.0.1:6610'
+ANDROID_APP_PACKAGE = os.getenv('ANDROID_APP_PACKAGE', 'com.ideamaker.valecap').strip()
+TESSERACT_CMD = resolver_tesseract_cmd()
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '').strip()
+
+
+def get_deepseek_api_key() -> str:
+    """Obtém a chave da API DeepSeek do .env (fallback temporário para src/api_deepseek.txt)."""
+    chave = os.getenv('DEEPSEEK_API_KEY', '').strip().strip('"').strip("'")
+    if chave:
+        return chave
+
+    caminho_legado = os.path.join(SRC_DIR, 'api_deepseek.txt')
+    if os.path.exists(caminho_legado):
+        logging.warning("⚠️ Usando src/api_deepseek.txt (legado). Migre para DEEPSEEK_API_KEY no arquivo .env.")
+        with open(caminho_legado, 'r', encoding='utf-8') as f:
+            return f.read().strip().replace('"', '')
+
+    raise RuntimeError("DEEPSEEK_API_KEY não configurada. Crie um arquivo .env baseado no .env.example.")
+
+
+def get_login_credenciais() -> tuple[str, str]:
+    """Obtém CPF e senha do .env (fallback temporário para src/login.txt)."""
+    cpf = os.getenv('VALECAP_CPF', '').strip()
+    senha = os.getenv('VALECAP_SENHA', '').strip()
+    if cpf and senha:
+        return cpf, senha
+
+    caminho_legado = os.path.join(SRC_DIR, 'login.txt')
+    if os.path.exists(caminho_legado):
+        logging.warning("⚠️ Usando src/login.txt (legado). Migre para VALECAP_CPF e VALECAP_SENHA no arquivo .env.")
+        with open(caminho_legado, 'r', encoding='utf-8') as f:
+            linhas = [l.strip() for l in f.readlines() if l.strip()]
+            if len(linhas) >= 2:
+                return linhas[0], linhas[1]
+
+    raise RuntimeError("Credenciais VALECAP_CPF/VALECAP_SENHA não configuradas no .env.")
 
 
 # Adiciona ao path do Python
@@ -103,6 +210,7 @@ ARVORE_DECISAO = {
                             "nome": "escolher_numeros_titulo",
                             "moldes": ["cartela_visivel_ancora.PNG", "atualizando_cartela.PNG"], 
                             "config": {
+                                "media_corte": 57.6,
                                 "nota_corte": 11.8,
                                 "limite_tentativas": 30,
                                 "espera_entre_limite_tentativas": 300,

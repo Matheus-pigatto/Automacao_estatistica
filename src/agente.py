@@ -1,11 +1,10 @@
 import datetime
-from enum import auto
 from openai import OpenAI
 import json
 from typing import List, Dict, Any
-import automacao
 from db.estrutura_de_dados import Sorteio
 from db.rag import SorteioRAG
+from config import PROJECT_ROOT, RAG_DIR
 from time import sleep
 import os
 
@@ -16,34 +15,38 @@ class AgenteSorteiosDeepSeek:
         """
         self.api_key = api_key
         self.model = model
-        print(self.api_key)
         self.client = OpenAI(
             api_key=self.api_key,
             base_url="https://api.deepseek.com"  # Verifique o endpoint
         )
         
         # Sistema RAG
-        self.rag_sorteios = SorteioRAG()
+        self.rag_sorteios = SorteioRAG(caminho_base=RAG_DIR)
         
         # Histórico de conversa
-        self.caminho_base = r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\RAG\\"
+        self.caminho_base = RAG_DIR
+        os.makedirs(self.caminho_base, exist_ok=True)
         self.historico = self._carregar_historico()
         self._atualizar_dados_background()
    
   
     def _carregar_historico(self):
-        caminho = f"{self.caminho_base}_historico.json"
+        caminho = os.path.join(self.caminho_base, "_historico.json")
         if os.path.exists(caminho):
             with open(caminho, 'r', encoding='utf-8') as f:
                 return json.load(f)
         return [{"role": "system", "content": "Você é um especialista em estatística de sorteios."}]
 
     def _atualizar_dados_background(self):
-        """Carrega os sorteios salvos e recalcula estatísticas sem intervenção"""
-        if os.path.exists(f"{self.caminho_base}_rag"):
-            self.rag_sorteios.carregar(f"{self.caminho_base}_rag")
-        # Aqui você pode disparar scripts de scraping ou atualização de DB
-        self.estatisticas_atuais = self.rag_sorteios._recalcular_e_salvar()
+        """Carrega os sorteios salvos e recalcula estatísticas se necessário"""
+        avancadas = self.rag_sorteios.memoria.get('metricas_avancadas', {})
+        precisa_recalcular = (
+            bool(self.rag_sorteios.memoria.get('objetos_sorteio'))
+            and (not self.rag_sorteios.memoria.get('estatisticas') or 'tendencias' not in avancadas)
+        )
+        if precisa_recalcular:
+            self.rag_sorteios._recalcular_e_salvar()
+        self.estatisticas_atuais = self.rag_sorteios.memoria.get('estatisticas', {})
 
 
     def consultar(self, pergunta: str, contexto_extra: str = ""):
@@ -95,35 +98,36 @@ class AgenteSorteiosDeepSeek:
             return f"Erro: {str(e)}"
 
     def _salvar_estado(self):
-        with open(f"{self.caminho_base}_historico.json", 'w', encoding='utf-8') as f:
+        with open(os.path.join(self.caminho_base, "_historico.json"), 'w', encoding='utf-8') as f:
             json.dump(self.historico, f, indent=2, ensure_ascii=False)
 
     def analisar_cartela_viva(self, dezenas_lidas):
         """Analisa a cartela oferecida pelo Vale Cap em tempo real"""
         
-        # 1. Roda o Monte Carlo (35% de vantagem está aqui)
-        score = self.rag_sorteios.simular_monte_carlo(dezenas_lidas)
+        res = self.rag_sorteios.simular_monte_carlo(dezenas_lidas)
+        score = res.get("weighted_score", 0.0)
+        media = res.get("media", 60.0)
 
-        # 2. Gera o veredito
         if score >= 75:
             veredito = "🔥 COMPRA IMEDIATA! Estatisticamente superior."
-        elif score >= 50:
-            veredito = "✅ BOA. Está dentro da média competitiva."
+        elif score >= 55:
+            veredito = "✅ BOA. Acima da média aleatória."
         else:
             veredito = "❌ PASSE. Esta cartela tende a ser lenta."
             
         return {
             "score": score,
             "veredito": veredito,
-            "media_projetada": "37 bolas"
+            "media_projetada": f"{media:.2f} bolas",
+            "detalhes": res
         }
     
     def atualizar_conhecimento(self):
         try:
             # Caminho do CSV na raiz
-            caminho_csv = os.path.join(os.getcwd(), "historico_vale_cap.csv") 
+            caminho_csv = os.path.join(PROJECT_ROOT, "historico_vale_cap.csv") 
             if not os.path.exists(caminho_csv):
-                return False, "Arquivo 'base_sorteios.csv' não encontrado na raiz."
+                return False, f"Arquivo '{caminho_csv}' não encontrado."
 
             # Chama a função que você apresentou
             qtd_novos = self.rag_sorteios.sincronizar_com_csv(caminho_csv)
@@ -141,7 +145,10 @@ class AgenteSorteiosDeepSeek:
         import pickle
         import pandas as pd
         # Carrega o dicionário do Pickle
-        with open(r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\RAG\jogos.pkl", 'rb') as f:
+        caminho_pkl = os.path.join(self.caminho_base, "jogos.pkl")
+        if not os.path.exists(caminho_pkl):
+            return pd.DataFrame()
+        with open(caminho_pkl, 'rb') as f:
             dados_pkl = pickle.load(f)
         
         # Extrai a lista de objetos 'Sorteio'

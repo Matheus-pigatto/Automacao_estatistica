@@ -116,18 +116,20 @@ def login_app() -> bool:
         pyautogui.click(acessar)
         sleep(2)
         
+        cpf, senha = get_login_credenciais()
+
         # Sequência de Login (CPF -> Senha -> Entrar)
         # CPF
         cpf_campo = pyautogui.locateCenterOnScreen(r"db\imagens_para_automacao\inserir_cpf.PNG", confidence=0.8)
         x_cpf, y_cpf = cpf_campo if cpf_campo else (1600, 628)
         pyautogui.click(x_cpf, y_cpf)
-        pyautogui.write("40697047873", interval=0.1)
+        pyautogui.write(cpf, interval=0.1)
 
         # SENHA
         senha_campo = pyautogui.locateCenterOnScreen(r"db\imagens_para_automacao\inserir_senha.PNG", confidence=0.8)
         x_sen, y_sen = senha_campo if senha_campo else (1600, 763)
         pyautogui.click(x_sen, y_sen)
-        pyautogui.write("Ma171291th@", interval=0.1)
+        pyautogui.write(senha, interval=0.1)
 
         # BOTAO ENTRAR
         botao = pyautogui.locateCenterOnScreen(r"db\imagens_para_automacao\botao_entrar.PNG", confidence=0.8)

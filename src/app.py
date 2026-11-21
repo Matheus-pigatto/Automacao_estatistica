@@ -3,11 +3,11 @@ import subprocess
 import os
 from datetime import datetime
 import sys
-from automacao import buscar_titulo, script, limparFotos, trocar_titulo
+import pandas as pd
 import automacao_adb
+from automacao_adb import limparFotos
 import adb_manipulation
-from agente import AgenteSorteiosDeepSeek
-from config import DB_DIR
+from config import PROJECT_ROOT, SRC_DIR, DB_DIR, RAG_DIR, SS_DIR, MOLDES_DIR
 import json
 import time
 from db.rag import SorteioRAG
@@ -27,16 +27,14 @@ if "inicializado" not in st.session_state:
     st.session_state["inicializado"] = True
 
 @st.cache_resource
-def get_agente():
-    with open("src\\api_deepseek.txt", "r") as txt:
-        api_key = txt.read().strip()
-        api_key = api_key.split('"')
-    print("API Key loaded.")
-    #print(api_key[1])
-    return AgenteSorteiosDeepSeek(api_key=api_key[1])
+def get_rag():
+    rag_inst = SorteioRAG(caminho_base=RAG_DIR)
+    avancadas = rag_inst.memoria.get('metricas_avancadas', {})
+    if rag_inst.memoria.get('objetos_sorteio') and 'tendencias' not in avancadas:
+        rag_inst._recalcular_e_salvar()
+    return rag_inst
 
-agente = get_agente()
-rag = SorteioRAG()
+rag = get_rag()
 
 class SistemaUnificado:
     def run(self):
@@ -55,15 +53,8 @@ class SistemaUnificado:
 
     
     def pagina_automacoes(self):
-        # Garante que o agente está acessível
-        if 'agente' not in st.session_state:
-            st.session_state.agente = get_agente()
-
         if 'rag' not in st.session_state:
-            st.session_state.rag = rag
-        
-        # Atalho para facilitar a escrita
-        agente_ia = st.session_state.agente
+            st.session_state.rag = get_rag()
 
         
         
@@ -100,35 +91,42 @@ class SistemaUnificado:
                     qtd = st.radio(label="Quantidade de cartelas:", options =[1, 2, 4], index=False, horizontal=True)
                     
                 if st.button("Iniciar Busca", key="start", use_container_width=True):
-                    # Lógica de iniciar o robô
-                    config_missao = {
-                        "tipo": tipo_jogo,
-                        "quantidade": qtd,
-                        "status": "PROCESSANDO",
-                        "progresso": 0,
-                        "msg_status": "Iniciando...",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    with open(os.path.join(DB_DIR, "config_automacao.json"), "w") as f:
-                        json.dump(config_missao, f)
-                    time.sleep(1)  # Pequena pausa para garantir que o arquivo foi escrito    
-                    automacao_adb.main()  # Inicia o script de automação em background
-                    st.success(f"Iniciando busca no jogo **{tipo_jogo}**, buscando **{qtd} cartelas**.",width=500)
-                    
-                    
-
-
-            if st.button("📊  Atualizar estátistica", key="update", use_container_width=True):
-                with st.spinner("Atualizando informações..."):
-                    sucesso, mensagem = st.session_state.agente.atualizar_conhecimento()
-        
-                    if sucesso:
-                        st.success(mensagem)
-                        # Opcional: força um recarregamento para mostrar novos dados nos gráficos
-                        st.session_state.expandido_estatistica = True
-                        #st.rerun()
+                    proc_existente = st.session_state.get("robo_processo")
+                    if proc_existente is not None and proc_existente.poll() is None:
+                        st.warning("⚠️ O robô já está em execução em segundo plano.")
                     else:
-                        st.error(mensagem)
+                        # Lógica de iniciar o robô em processo separado (não trava o Streamlit)
+                        config_missao = {
+                            "tipo": tipo_jogo,
+                            "quantidade": qtd,
+                            "status": "PROCESSANDO",
+                            "progresso": 0,
+                            "msg_status": "Iniciando...",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        salvar_config_seguro(config_missao)
+                        script_robo = os.path.join(SRC_DIR, "automacao_adb.py")
+                        st.session_state["robo_processo"] = subprocess.Popen(
+                            [sys.executable, script_robo],
+                            cwd=PROJECT_ROOT
+                        )
+                        st.success(f"Robô iniciado em segundo plano para **{tipo_jogo}**, buscando **{qtd} cartelas**.")
+                    
+                    
+
+
+            if st.button("📊  Atualizar estatísticas", key="update", use_container_width=True):
+                with st.spinner("Atualizando informações..."):
+                    caminho_csv = os.path.join(PROJECT_ROOT, "historico_vale_cap.csv")
+                    if not os.path.exists(caminho_csv):
+                        st.error(f"Arquivo '{caminho_csv}' não encontrado.")
+                    else:
+                        qtd_novos = st.session_state.rag.sincronizar_com_csv(caminho_csv) or 0
+                        if qtd_novos > 0:
+                            st.success(f"Sucesso! {qtd_novos} novos sorteios integrados e estatísticas recalculadas.")
+                        else:
+                            st.info("A base já estava atualizada.")
+                        st.session_state.expandido_estatistica = True
             
             if st.button("📊  Visualizar tabela de jogos ", key="table", use_container_width=True):
                 st.session_state.tabela_jogos_historico = not st.session_state.tabela_jogos_historico
@@ -161,16 +159,23 @@ class SistemaUnificado:
 
         if st.session_state.get('tabela_jogos_historico', False):
             st.divider()
-            # Busca o DataFrame já convertido
-            df = st.session_state.agente.carregar_tabelas_rag_exibicao()
+            objetos = st.session_state.rag.memoria.get('objetos_sorteio', [])
+            df = pd.DataFrame([
+                {
+                    "Concurso/Sorteio": obj.concurso,
+                    "Data": obj.data,
+                    "Dezenas": ", ".join(map(str, obj.numeros)),
+                    "Qtd": len(obj.numeros),
+                }
+                for obj in objetos
+            ])
             
             if not df.empty:
                 st.write("### 📜 Histórico de Sorteios Processados")
-                # Exibe o dataframe com busca e ordenação habilitadas
                 st.dataframe(
                     df, 
                     use_container_width=True, 
-                    hide_index=True # Esconde a coluna de índices (0, 1, 2...)
+                    hide_index=True
                 )
             else:
                 st.warning("Nenhum dado encontrado no histórico.")
@@ -209,24 +214,10 @@ class SistemaUnificado:
 
 
         st.divider()
-        # --- SEÇÃO DO CHAT ---
-        st.write("### 💬 Assistente de Análise Vale Cap")
-        
-        # Sincroniza e exibe histórico
-        for message in agente.historico:
-            if message["role"] == "system": continue
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-        if prompt := st.chat_input("Pergunte sobre probabilidade, desvio padrão..."):
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            
-            with st.chat_message("assistant"):
-                with st.spinner("Consultando RAG..."):
-                    resposta = agente.consultar(prompt) # Certifique-se que o método chama-se consultar ou analisar
-                    st.markdown(resposta)
-            #st.rerun()
+        # --- SEÇÃO DE ESTATÍSTICAS LOCAIS (SEM API EXTERNA) ---
+        st.write("### 📊 Estatísticas da Base RAG (100% Local)")
+        self.atualizar_estatisticas()
+        st.caption("💡 Gestão e análises aprofundadas sobre logs e estratégias são feitas diretamente pelo chat do Antigravity (sem custo de API).")
 
     
     def procurar_jogos(self, script_path):
@@ -254,9 +245,9 @@ class SistemaUnificado:
 
     def atualizar_estatisticas(self):
             
-        # Puxa os dados calculados que estão na memória do Agente
-        rag = st.session_state.agente.rag_sorteios
-        stats = rag.memoria.get('estatisticas', {})
+        # Puxa os dados calculados diretamente do RAG local
+        rag_local = st.session_state.rag
+        stats = rag_local.memoria.get('estatisticas', {})
         
         if not stats:
             st.warning("Nenhuma estatística disponível. Clique em 'Atualizar estatísticas' primeiro.")
@@ -270,7 +261,6 @@ class SistemaUnificado:
 
         # Gráfico de Frequência das 20 mais sorteadas
         st.write("### 🔥 Top 20 Dezenas Mais Frequentes")
-        import pandas as pd
         
         # Prepara os dados para o gráfico
         df_freq = pd.DataFrame(
@@ -282,9 +272,9 @@ class SistemaUnificado:
         st.bar_chart(df_freq.set_index('Dezena'))
 
         # Se houver métricas avançadas (Markov/Regressão), podemos mostrar um sumário
-        if 'metricas_avancadas' in rag.memoria:
+        if 'metricas_avancadas' in rag_local.memoria:
             with st.expander("🧠 Insights da Inteligência Avançada"):
-                st.json(rag.memoria['metricas_avancadas'])
+                st.json(rag_local.memoria['metricas_avancadas'])
 
     def painel_simulado(self):
         pass
@@ -296,6 +286,32 @@ class SistemaUnificado:
         #    os.system('sudo apt-get autoremove -y')
         #    st.info("Limpeza de sistema iniciada")
 
+    def pagina_sistema(self):
+        """Página de status e controle de processo do sistema"""
+        st.subheader("⚙️ Configurações e Status do Sistema", divider="grey")
+        proc = st.session_state.get("robo_processo")
+        em_execucao = proc is not None and proc.poll() is None
+
+        if em_execucao:
+            st.success(f"🟢 Robô ADB em execução (PID: {proc.pid})")
+            if st.button("🛑 Parar Robô", type="primary"):
+                proc.terminate()
+                st.session_state["robo_processo"] = None
+                salvar_config_seguro({"progresso": 0, "status": "AGUARDANDO", "msg_status": "Parado pelo usuário"})
+                st.rerun()
+        else:
+            st.info("⚪ Nenhum processo de robô em execução.")
+
+        with st.expander("📁 Diretórios Configurados"):
+            st.json({
+                "PROJECT_ROOT": PROJECT_ROOT,
+                "SRC_DIR": SRC_DIR,
+                "DB_DIR": DB_DIR,
+                "RAG_DIR": RAG_DIR,
+                "SS_DIR": SS_DIR,
+                "MOLDES_DIR": MOLDES_DIR,
+            })
+
     def pagina_dashboard(self):
         """Página inicial do dashboard"""
         st.header("🏠 Dashboard Principal")
@@ -304,8 +320,8 @@ class SistemaUnificado:
 
         col1, col2 = st.columns(2)
         col1.button("🎰 Adicionar ultimo sorteio")
-        col2.button("📊 Procurar cartela para comprar", on_click=lambda: trocar_titulo())
-        BASE_DIR = r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra"
+        col2.button("📊 Procurar cartela para comprar")
+        BASE_DIR = PROJECT_ROOT
 
     def monitorar_automacao(self):
         
@@ -317,23 +333,38 @@ class SistemaUnificado:
             dados = json.load(f)
 
         # O status deve ser exatamente o que o robô gravou
-        st.write(dados)
         if dados.get("status") == "aguardando_aprovacao":
-            st.warning("⚠️ CARTELA FILTRADA ENCONTRADA!")
+            st.warning(f"⚠️ CARTELA FILTRADA ENCONTRADA! (Título: {dados.get('id_cartela', 'N/A')})")
             
             # EXIBIÇÃO DO GRÁFICO (Garanta que matplotlib está instalado)
             if "monte_carlo_data" in dados and dados["monte_carlo_data"]:
                 import matplotlib.pyplot as plt
                 fig, ax = plt.subplots(figsize=(8, 3))
                 ax.hist(dados["monte_carlo_data"], bins=30, color='gold', edgecolor='black')
-                ax.axvline(dados['media'], color='red', label=f"Média: {dados['media']:.2f}")
+                ax.axvline(dados['media'], color='red', label=f"Média RAG: {dados['media']:.2f}")
+                if dados.get("media_pura"):
+                    ax.axvline(dados['media_pura'], color='blue', linestyle='--', label=f"Base Aleatória: {dados['media_pura']:.2f}")
                 ax.legend()
                 st.pyplot(fig) # MOSTRA O GRÁFICO
             
             else:
                 st.info("Aguardando dados da simulação para gerar gráfico...")
+
             # MÉTRICAS
-            st.write(f"Média: **{dados['media']:.2f}** | Prob 50: **{dados['prob_50']:.2f}%**")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Média RAG", f"{dados.get('media', 0):.2f}", delta=f"{dados.get('ganho_rag', 0):+.2f} bolas")
+            m2.metric("Score RAG", f"{dados.get('weighted_score', 0):.1f}/100")
+            m3.metric("Prob ≤ 50", f"{dados.get('prob_50', 0):.2f}%")
+            m4.metric("Prob ≤ 55", f"{dados.get('prob_55', 0):.2f}%")
+
+            resumo = dados.get("resumo_dezenas", {})
+            if resumo:
+                st.caption(
+                    f"Clusters: **Elite:** {resumo.get('elite', 0)} | "
+                    f"**Médio:** {resumo.get('medio', 0)} | "
+                    f"**Inerte:** {resumo.get('inerte', 0)} | "
+                    f"**Atraso médio:** {resumo.get('atraso_medio', 0)} sorteios"
+                )
 
             c1, c2 = st.columns(2)
             if c1.button("✅ COMPRAR", use_container_width=True):

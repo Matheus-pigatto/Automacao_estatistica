@@ -9,8 +9,10 @@ print("")
 print("")
 print("")
 print("**********************************************************************************************")
-caminho_pdf = r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\pdf_cartelas"
-lista_pdf = os.listdir(r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\pdf_cartelas")
+BASE_DB_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DB_DIR)
+caminho_pdf = os.path.join(BASE_DB_DIR, "pdf_cartelas")
+lista_pdf = os.listdir(caminho_pdf)
 #print(caminho_pdf)
 for item in lista_pdf:
     
@@ -144,7 +146,7 @@ for item in lista_pdf:
         df = pd.DataFrame(lista_para_df)
         #print(df)
         if df.shape[0] == 4 :
-            arquivo_csv = 'historico_vale_cap.csv'
+            arquivo_csv = os.path.join(PROJECT_ROOT, 'historico_vale_cap.csv')
             header_condicional = not os.path.exists(arquivo_csv)
 
             df.to_csv(arquivo_csv, mode='a', index=False, sep=';', encoding='utf-8-sig', header=header_condicional)

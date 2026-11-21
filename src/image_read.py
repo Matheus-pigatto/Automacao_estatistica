@@ -1,4 +1,3 @@
-from ast import match_case
 import pytesseract
 from PIL import Image 
 import cv2
@@ -6,22 +5,11 @@ import os
 from time import sleep
 from pprint import pprint
 import numpy as np
-import gerenciadorjanelas as gj
 from datetime import datetime
-#from automacao import coletar_cartelas
+from config import TESSERACT_CMD
 
-#print("-------------------------")
-#3print("carregando módulo automacao.image_read...")
-#3PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__).removesuffix('\\config.py'))
-#3pasta_ativa = os.getcwd()
-#pasta_destino = rf"{PROJECT_ROOT}"
-#print(f"Endereço atual: {pasta_ativa}")
-#print(f"Pasta desejada: {pasta_destino}")
-
-
-
-# Caminho para o executável do Tesseract (ajuste se necessário)
-pytesseract.pytesseract.tesseract_cmd = r'D:\Program Files\Tesseract-OCR\tesseract.exe'
+# Caminho para o executável do Tesseract (configurável via .env -> TESSERACT_CMD)
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 def nada(x):
     # Função obrigatória para o Trackbar, mas não precisa fazer nada
     pass
@@ -105,6 +93,7 @@ def imagem_ajuste(imagem_path: str, imagem_nome: str) -> dict:
                 else:
                     lista_dezenas.append(None)
 
+        todas_validas = True
         for idx, dezena in enumerate(lista_dezenas):
             print(f"--- Processando posição {idx} ---")
             
@@ -117,27 +106,31 @@ def imagem_ajuste(imagem_path: str, imagem_nome: str) -> dict:
                 valor = int(dezena)
                 match idx:
                     case 0 | 1 | 2 | 3 | 4:
-                        status = False if valor > 15 else True
+                        status = 1 <= valor <= 15
                     case 5 | 6 | 7 | 8 | 9:
-                        status = False if valor < 16 or valor > 30 else True
+                        status = 16 <= valor <= 30
                     case 10 | 11 | 12 | 13 | 14:
-                        status = False if valor < 31 or valor > 45 else True
+                        status = 31 <= valor <= 45
                     case 15 | 16 | 17 | 18 | 19:
-                        status = False if valor < 46 or valor > 60 else True
+                        status = 46 <= valor <= 60
                     case _:
                         status = False
+
+            if not status:
+                todas_validas = False
 
             # Agora todos os prints vão aparecer para cada um dos 20 itens
             print(f"Valor: {dezena} | Status: {status}")
 
-            if dezena is not None and status == False:
+            if dezena is not None and not status:
                 print(f"⚠️ Dezena {dezena} fora do intervalo esperado.")
 
         # --- RESULTADO FINAL ---
+        dezenas_validas = [d for d in lista_dezenas if d is not None]
         resultado = {
             "titulo": titulo_limpo,
             "dezenas": lista_dezenas,
-            "status": "sucesso" if len([d for d in lista_dezenas if d]) == 20 and status == True else "alerta_falha_leitura"
+            "status": "sucesso" if len(dezenas_validas) == 20 and len(set(dezenas_validas)) == 20 and todas_validas else "alerta_falha_leitura"
         }
         print(f"Leitura Concluída: Título {resultado['titulo']} | {len(lista_dezenas)} dezenas." )
         print(f"Status da leitura: {resultado['status']}")

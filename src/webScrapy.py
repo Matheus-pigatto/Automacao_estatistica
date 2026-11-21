@@ -13,9 +13,13 @@ from seleniumwire import webdriver # Importe do seleniumwire em vez do selenium 
 
 
 
+from config import PDF_DIR
+
+os.makedirs(PDF_DIR, exist_ok=True)
+
 chrome_options = Options()
 prefs = {
-    "download.default_directory": r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\pdf_cartelas, # Pasta de destino",
+    "download.default_directory": PDF_DIR,
     "download.prompt_for_download": False,       # Desativa a pergunta "Salvar como"
     "download.directory_upgrade": True,
     "plugins.always_open_pdf_externally": True   # OBRIGATÓRIO: Faz o Chrome baixar em vez de abrir no navegador
@@ -29,7 +33,7 @@ driver.scopes = [
     '.*pdfemb-data.*'  # Permite o plugin de PDF
 ]
 
-download_dir = r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\pdf_cartelas"
+download_dir = PDF_DIR
 x = 1
 for x in range (10,1,-1):
     URL = f"https://www.portalr3.com.br/editoria/vale-cap/page/{x}" 

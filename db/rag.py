@@ -1,6 +1,14 @@
-import faiss
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any
 import pickle
 from collections import defaultdict, Counter
@@ -12,9 +20,12 @@ from scipy import stats
 from datetime import datetime
 
 class SorteioRAG:
-    def __init__(self, model_name='all-MiniLM-L6-v2', caminho_base=r"D:\Documentos\Projetos de programacao\Automacao de estatistica vale cap e compra\db\RAG"):
-        self.embedder = SentenceTransformer(model_name)
+    def __init__(self, model_name='all-MiniLM-L6-v2', caminho_base=None, usar_embeddings=False):
+        self.embedder = SentenceTransformer(model_name) if (usar_embeddings and SentenceTransformer is not None) else None
+        if caminho_base is None:
+            caminho_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RAG")
         self.caminho_base = caminho_base
+        os.makedirs(self.caminho_base, exist_ok=True)
         
         # Estado Interno Único
         self.memoria = {
@@ -24,7 +35,7 @@ class SorteioRAG:
             'metricas_avancadas': {} # <--- ADICIONADO PARA GUARDAR MARKOV/ERLANG
         }
         
-        self.index = faiss.IndexFlatL2(self.embedder.get_sentence_embedding_dimension())
+        self.index = faiss.IndexFlatL2(self.embedder.get_sentence_embedding_dimension()) if (self.embedder is not None and faiss is not None) else None
         self._carregar_estado()
 
     def sincronizar_com_csv(self, caminho_csv: str):
@@ -58,9 +69,10 @@ class SorteioRAG:
                 txt = sorteio.to_text()
                 self.memoria['textos'].append(txt)
                 
-                # Adiciona ao FAISS
-                embedding = self.embedder.encode(txt)
-                self.index.add(np.array([embedding]).astype('float32'))
+                # Adiciona ao FAISS (se embeddings estiverem habilitados)
+                if self.embedder is not None and self.index is not None:
+                    embedding = self.embedder.encode(txt)
+                    self.index.add(np.array([embedding]).astype('float32'))
             
             # 5. Atualiza os PKLs e as estatísticas globais
             self._recalcular_e_salvar()
@@ -92,8 +104,9 @@ class SorteioRAG:
                 # Protocolo 4 ou superior é mais estável para objetos grandes
                 pickle.dump(self.memoria, f, protocol=pickle.HIGHEST_PROTOCOL)
             
-            # Salva o FAISS separadamente como você já faz
-            faiss.write_index(self.index, os.path.join(self.caminho_base, "jogos.index"))
+            # Salva o FAISS separadamente se estiver habilitado
+            if faiss is not None and self.index is not None:
+                faiss.write_index(self.index, os.path.join(self.caminho_base, "jogos.index"))
             print("✅ Tudo salvo com sucesso!")
         except Exception as e:
             print(f"❌ Erro ao salvar pkl: {e}")
@@ -144,29 +157,41 @@ class SorteioRAG:
         # Verifica se um sorteio específico da semana é mais 'difícil'
         sorteios_por_tipo = defaultdict(list)
         for s in sorteios:
-            if hasattr(s, 'tipo'): # Ex: 1o sorteio, 2o sorteio...
-                sorteios_por_tipo[s.tipo].append(len(s.numeros))
+            tipo = getattr(s, 'tipo', None)
+            if not tipo and isinstance(s.concurso, str) and " - " in s.concurso:
+                tipo = s.concurso.split(" - ")[-1].strip()
+            if tipo:
+                sorteios_por_tipo[tipo].append(len(s.numeros))
         
         if len(sorteios_por_tipo) > 1:
             f_stat, anova_p = stats.f_oneway(*sorteios_por_tipo.values())
         else:
             anova_p = 1.0
 
-        # 5. K-MEANS (Clusterização de Números)
+        # 5. K-MEANS / QUARTIS (Clusterização de Números)
         # Divide os números em 3 grupos: Elite, Médio, Inerte
-        dados_cluster = np.array([contagem_real.get(i, 0) for i in range(1, 61)]).reshape(-1, 1)
-        # Simulação simples de cluster por quartis (mais rápido que sklearn para 60 números)
+        frequencia_completa = {n: contagem_real.get(n, 0) for n in range(1, 61)}
+        dados_cluster = np.array([frequencia_completa[i] for i in range(1, 61)]).reshape(-1, 1)
         limiar_elite = np.percentile(dados_cluster, 75)
         limiar_inerte = np.percentile(dados_cluster, 25)
         
         clusters = {}
         for n in range(1, 61):
-            freq = contagem_real.get(n, 0)
+            freq = frequencia_completa[n]
             if freq >= limiar_elite: clusters[n] = "Elite"
             elif freq <= limiar_inerte: clusters[n] = "Inerte"
             else: clusters[n] = "Médio"
 
-        # 6. ERLANG / ATRASO (Tempo de Espera)
+        # 6. TENDÊNCIA RECENTE (Últimos 20 sorteios vs média histórica)
+        janela_recente = sorteios[-20:]
+        contagem_recente = Counter(n for s in janela_recente for n in s.numeros)
+        media_recente = sum(contagem_recente.values()) / 60.0 if janela_recente else 1.0
+        tendencias = {
+            n: round((contagem_recente.get(n, 0) - media_recente) / max(media_recente, 1e-6), 4)
+            for n in range(1, 61)
+        }
+
+        # 7. ERLANG / ATRASO (Tempo de Espera)
         atrasos = {}
         for n in range(1, 61):
             distancia = 0
@@ -175,7 +200,7 @@ class SorteioRAG:
                 distancia += 1
             atrasos[n] = distancia
 
-        # 7. MARKOV (Transição)
+        # 8. MARKOV (Transição)
         transicoes = Counter()
         for i in range(len(sorteios)-1):
             for n1 in sorteios[i].numeros:
@@ -186,199 +211,156 @@ class SorteioRAG:
             "chi_score": float(chi_stat),
             "p_value": float(p_value),
             "status": "Aleatório" if p_value > 0.05 else "Tendencioso",
-            'entropia_alvo': media_entropia_ganhadora,
-            'anova_p_valor': anova_p,
+            'entropia_alvo': float(media_entropia_ganhadora),
+            'anova_p_valor': float(anova_p),
+            'frequencia_completa': frequencia_completa,
+            'tendencias': tendencias,
             'clusters': clusters,             # Dicionário {número: categoria}
-            'atrasos': atrasos,               # Dicionário {número: semanas_sem_sair}
+            'atrasos': atrasos,               # Dicionário {número: sorteios_sem_sair}
             'transicoes': dict(transicoes.most_common(100)),
             'timestamp_analise': datetime.now().isoformat()
         }
 
-    def simular_comparativo(self, dezenas_cartela, num_simulacoes=1000):
-        # CORREÇÃO 1: Garantir que todas as dezenas da cartela sejam INTEIROS
-        dezenas_cartela = [int(d) for d in dezenas_cartela]
-        
-        print("Iniciando simulação comparativa...")
-        print(f"Dezenas da cartela: {dezenas_cartela}")
-
-        media_vitoria = 37
+    def _calcular_pesos_rag(self) -> np.ndarray:
+        """
+        Gera vetor de probabilidades (tamanho 60, índices 0..59 -> dezenas 1..60)
+        combinando frequência histórica, tendência recente e atraso do RAG.
+        """
         avancadas = self.memoria.get('metricas_avancadas', {})
+        if not avancadas:
+            return np.full(60, 1.0 / 60.0, dtype=np.float64)
 
-        # Armazenaremos em qual bola a cartela fechou em cada simulação
-        bolas_fechamento_puro = []
-        bolas_fechamento_viciado = []
-        #print("Métricas avançadas carregadas:", avancadas)
-        
-        # Pegar dados de atraso e tendência (garantindo que as chaves sejam ints)
+        freq_raw = avancadas.get('frequencia_completa', {})
+        tend_raw = avancadas.get('tendencias', {})
         atrasos_raw = avancadas.get('atrasos', {})
-        # Converter chaves de atraso para int caso estejam como string no PKL
-        atrasos = {int(k): v for k, v in atrasos_raw.items()}
-        
-        # --- SIMULAÇÃO 1: PURA ---
-        acertos_puros = 0
-        for _ in range(num_simulacoes):
-            globo = list(range(1, 61))
-            np.random.shuffle(globo)
-            contagem = 0
-            for bola_num, n in enumerate(globo, 1):
-                if n in dezenas_cartela: 
-                    contagem += 1
-                if contagem == 20:
-                    if bola_num <= media_vitoria: 
-                        acertos_puros += 1
-                    break
-        
-        # --- SIMULAÇÃO 2: VICIADA ---
-        pesos = []
-        for n in range(1, 61):
-            # Busca o peso. Se não existir o número no histórico, usa peso base 1.0
-            w_atraso = atrasos.get(n, 0) * 0.5
-            w_tendencia = avancadas.get('tendencias', {}).get(n, 0) * 10
-            pesos.append(max(0.1, 1.0 + w_atraso + w_tendencia))
-        
-        pesos = np.array(pesos) / sum(pesos)
-        
-        acertos_viciados = 0
-        for _ in range(num_simulacoes):
-            # np.random.choice gera o sorteio baseado nos pesos de probabilidade
-            globo_viciado = np.random.choice(range(1, 61), size=60, replace=False, p=pesos)
-            contagem = 0
-            for bola_num, n in enumerate(globo_viciado, 1):
-                if n in dezenas_cartela: 
-                    contagem += 1
-                if contagem == 20:
-                    if bola_num <= media_vitoria: 
-                        acertos_viciados += 1
-                    break
 
-            # Pesos (Histórico)
-        pesos = []
-        atrasos = {int(k): v for k, v in avancadas.get('atrasos', {}).items()}
-        for n in range(1, 61):
-            w_atraso = atrasos.get(n, 0) * 0.5
-            w_tendencia = avancadas.get('tendencias', {}).get(n, 0) * 10
-            pesos.append(max(0.1, 1.0 + w_atraso + w_tendencia))
-        pesos = np.array(pesos) / sum(pesos)
+        freqs = np.array([float(freq_raw.get(n, freq_raw.get(str(n), 0))) for n in range(1, 61)], dtype=np.float64)
+        media_freq = np.mean(freqs) if np.sum(freqs) > 0 else 1.0
+        fator_freq = (freqs / media_freq) if np.sum(freqs) > 0 else np.ones(60, dtype=np.float64)
 
-        for _ in range(num_simulacoes):
-            # 1. Simulação Pura
-            globo = list(range(1, 61))
-            np.random.shuffle(globo)
-            contagem = 0
-            for bola_num, n in enumerate(globo, 1):
-                if n in dezenas_cartela: contagem += 1
-                if contagem == 20:
-                    bolas_fechamento_puro.append(bola_num)
-                    break
+        tends = np.array([float(tend_raw.get(n, tend_raw.get(str(n), 0.0))) for n in range(1, 61)], dtype=np.float64)
+        atrasos = np.array([float(atrasos_raw.get(n, atrasos_raw.get(str(n), 0.0))) for n in range(1, 61)], dtype=np.float64)
+        media_atraso = max(float(np.mean(atrasos)), 1.0)
+        fator_atraso = np.clip((atrasos - media_atraso) / media_atraso, -0.5, 1.0)
 
-            # 2. Simulação Viciada (RAG/Histórico)
-            globo_viciado = np.random.choice(range(1, 61), size=60, replace=False, p=pesos)
-            contagem = 0
-            for bola_num, n in enumerate(globo_viciado, 1):
-                if n in dezenas_cartela: contagem += 1
-                if contagem == 20:
-                    bolas_fechamento_viciado.append(bola_num)
-                    break
+        # Combinação balanceada e estável: base histórica + tendência recente + pressão de atraso
+        pesos = np.clip(fator_freq + 0.25 * tends + 0.15 * fator_atraso, 0.25, None)
+        return pesos / np.sum(pesos)
 
-        # MÉTRICAS FINAIS
-        # Média de bolas para fechar (Quanto menor, melhor a cartela)
-        media_pura = np.mean(bolas_fechamento_puro)
-        media_viciada = np.mean(bolas_fechamento_viciado)
+    def _rodar_simulacao_vetorizada(self, indices_cartela: np.ndarray, pesos: np.ndarray, num_simulacoes: int) -> np.ndarray:
+        """
+        Simulação exata de sorteio sem reposição ponderado via estatísticas de ordem
+        Exponenciais: Exp(rate = peso_i) -> ordem crescente equivale a sorteio sem reposição com pesos.
+        Retorna a bola (20..60) em que a cartela fecha em cada simulação.
+        """
+        tempos = np.random.exponential(scale=1.0 / pesos, size=(num_simulacoes, 60))
+        tempo_fechamento = tempos[:, indices_cartela].max(axis=1, keepdims=True)
+        return np.sum(tempos <= tempo_fechamento, axis=1)
 
-        # Score de Eficiência (0 a 100)
-        # 37 bolas é o "Ideal", 60 é o "Pior". Criamos uma escala:
-        score_puro = max(0, min(100, (60 - media_pura) / (60 - 37) * 100))
-        score_viciado = max(0, min(100, (60 - media_viciada) / (60 - 37) * 100))
-
-                # No final da sua função simular_comparativo, antes do return, adicione:
-        media_bolas_para_fechar = np.mean(bolas_fechamento_viciado) if bolas_fechamento_viciado else 60
-        print(f"DEBUG: Esta cartela fecha, em média, na bola: {media_bolas_para_fechar}")
-
+    def simular_comparativo(self, dezenas_cartela, num_simulacoes=5000):
+        """Mantém compatibilidade retornando scores puro e ponderado pelo RAG."""
+        res = self.simular_monte_carlo(dezenas_cartela, num_simulacoes=num_simulacoes, usar_pesos_rag=True)
         return {
-            "pure_score": round(score_puro, 2),
-            "weighted_score": round(score_viciado, 2),
-            "media_bolas_viciado": round(media_viciada, 1)
+            "pure_score": res["pure_score"],
+            "weighted_score": res["weighted_score"],
+            "media_bolas_viciado": round(res["media"], 2),
+            "media_bolas_puro": round(res["media_pura"], 2),
+            "ganho_rag": res["ganho_rag"],
         }
-        
-    
-    def simular_monte_carlo(self, dezenas_cartela, num_simulacoes=10000):
-        """Versão com debug"""
-        print(f"dezenas que entraram no simulador: {dezenas_cartela}")
-        resultados_bola_fechamento = []
+
+    def simular_monte_carlo(self, dezenas_cartela, num_simulacoes=10000, usar_pesos_rag=True):
+        """
+        Simulação de Monte Carlo vetorizada usando os pesos estatísticos do RAG
+        (frequência, tendência recente e atraso) comparada à linha de base uniforme.
+        """
         try:
-            dezenas_set = set([int(d) for d in dezenas_cartela])
+            dezenas_int = sorted(set(int(d) for d in dezenas_cartela))
         except Exception as e:
             print(f"Erro ao converter dezenas: {e}")
-            return {"media": 0, "prob_50": 0, "prob_55": 0, "monte_carlo_data": []}
-        
-        # VALIDAÇÃO INICIAL
-        print(f"Cartela: {sorted(dezenas_set)}")
-        print(f"Quantidade de números: {len(dezenas_set)}")
-        print(f"Números únicos: {len(dezenas_set)}")
-        
-        for sim in range(num_simulacoes):
-            #print(f"simulação: {sim}")
-            globo = np.random.permutation(np.arange(1, 61))
-            acertos = 0
-            numeros_acertados = []
-            
-            for bola_idx, numero_sorteado in enumerate(globo, 1):
-                #print(f"valor do globo sorteado: \n{globo}")
-                if numero_sorteado in dezenas_set:
-                    acertos += 1
-                    #print(f"A bola sorteada #:{bola_idx}")
-                    #print(f"O numero sorteado foi: {numero_sorteado}")
-                    #print(f"acertou")
-                
-                if acertos == 20:
-                    #print(f"cartela premiada")
-                    #print(f"Resultado: {resultados_bola_fechamento}")
-                    resultados_bola_fechamento.append(bola_idx)
-                   
-        # 3. VALIDAÇÃO ANTES DO CÁLCULO
-        if not resultados_bola_fechamento:
-            return {"media": 0, "prob_50": 0, "prob_55": 0, "monte_carlo_data": []}            
-        #print(f"o resultado foi:")
-        resultados = np.array(resultados_bola_fechamento)
-        #print(f"{resultados}")
-        # 58.10 é a média de uma cartela aleatória. 
-        # Queremos saber a chance dela fechar significativamente antes (ex: 50 ou 52 bolas)
-        prob_50 = (np.sum(resultados <= 50) / len(resultados)) * 100
-        prob_55 = (np.sum(resultados <= 55) / len(resultados)) * 100
-        media = np.mean(resultados_bola_fechamento)
-        print('')
-        print('-'*30)
-        print(f"\n--- Resultados ---")
-        print(f"Média de fechamento: {media:.2f}")
-        print(f"Mínimo: {min(resultados_bola_fechamento)}")
-        print(f"Máximo: {max(resultados_bola_fechamento)}")
-        print(f"Primeiros 10 resultados: {sorted(resultados_bola_fechamento)[:10]}")
-        print(f"monte_carlo_data: {len(resultados.astype(int).tolist())} ")
-        print('-'*30)
-        print('')
-        
+            return {
+                "media": 60.0, "media_pura": 58.1, "ganho_rag": 0.0,
+                "prob_50": 0.0, "prob_55": 0.0,
+                "pure_score": 0.0, "weighted_score": 0.0,
+                "resumo_dezenas": {}, "monte_carlo_data": []
+            }
+
+        if len(dezenas_int) != 20 or any(d < 1 or d > 60 for d in dezenas_int):
+            print(f"Cartela inválida para simulação ({len(dezenas_int)} dezenas): {dezenas_int}")
+            return {
+                "media": 60.0, "media_pura": 58.1, "ganho_rag": 0.0,
+                "prob_50": 0.0, "prob_55": 0.0,
+                "pure_score": 0.0, "weighted_score": 0.0,
+                "resumo_dezenas": {}, "monte_carlo_data": []
+            }
+
+        indices = np.array([d - 1 for d in dezenas_int], dtype=np.int64)
+        pesos_uniforme = np.full(60, 1.0 / 60.0, dtype=np.float64)
+        pesos_rag = self._calcular_pesos_rag() if usar_pesos_rag else pesos_uniforme
+
+        resultados_rag = self._rodar_simulacao_vetorizada(indices, pesos_rag, num_simulacoes)
+        resultados_puro = self._rodar_simulacao_vetorizada(indices, pesos_uniforme, min(num_simulacoes, 3000))
+
+        media_rag = float(np.mean(resultados_rag))
+        media_pura = float(np.mean(resultados_puro))
+        ganho_rag = round(media_pura - media_rag, 2)
+
+        prob_50 = float((np.sum(resultados_rag <= 50) / len(resultados_rag)) * 100.0)
+        prob_55 = float((np.sum(resultados_rag <= 55) / len(resultados_rag)) * 100.0)
+
+        # Escala 0..100 centrada na média teórica uniforme (~58.10 = 50 pts; cada 1 bola mais rápido soma ~15 pts)
+        pure_score = round(float(np.clip(50.0 + (58.10 - media_pura) * 15.0, 0.0, 100.0)), 2)
+        weighted_score = round(float(np.clip(50.0 + (58.10 - media_rag) * 15.0, 0.0, 100.0)), 2)
+
+        # Resumo qualitativo da cartela segundo os clusters/atrasos do RAG
+        avancadas = self.memoria.get('metricas_avancadas', {})
+        clusters = avancadas.get('clusters', {})
+        atrasos = avancadas.get('atrasos', {})
+        contagem_clusters = Counter(clusters.get(d, clusters.get(str(d), "Médio")) for d in dezenas_int)
+        atraso_medio = float(np.mean([atrasos.get(d, atrasos.get(str(d), 0)) for d in dezenas_int])) if atrasos else 0.0
+
+        resumo_dezenas = {
+            "elite": contagem_clusters.get("Elite", 0),
+            "medio": contagem_clusters.get("Médio", 0),
+            "inerte": contagem_clusters.get("Inerte", 0),
+            "atraso_medio": round(atraso_medio, 2),
+        }
+
+        print(f"--- Monte Carlo RAG ({num_simulacoes} sims) ---")
+        print(f"Média RAG: {media_rag:.2f} | Média Pura: {media_pura:.2f} | Ganho: {ganho_rag:+.2f} bolas")
+        print(f"Prob <=50: {prob_50:.2f}% | Prob <=55: {prob_55:.2f}% | Score RAG: {weighted_score:.1f}/100")
+        print(f"Clusters: {resumo_dezenas}")
+
         return {
-        "media": float(media),
-        "prob_50": float(prob_50),
-        "prob_55": float(prob_55),
-        "monte_carlo_data": resultados.astype(int).tolist()
-    }
+            "media": round(media_rag, 2),
+            "media_pura": round(media_pura, 2),
+            "ganho_rag": ganho_rag,
+            "prob_50": round(prob_50, 2),
+            "prob_55": round(prob_55, 2),
+            "pure_score": pure_score,
+            "weighted_score": weighted_score,
+            "resumo_dezenas": resumo_dezenas,
+            "monte_carlo_data": resultados_rag.astype(int).tolist()
+        }
 
     def preparar_contexto_agente(self, pergunta: str) -> str:
         # Entrega estatísticas se a pergunta sugerir análise
         if any(p in pergunta.lower() for p in ['chance', 'probabilidade', 'frequência', 'estatística']):
             return f"Dados Estatísticos: {json.dumps(self.memoria['estatisticas'])}"
         
-        # Busca por similaridade
-        emb = self.embedder.encode([pergunta])
-        _, indices = self.index.search(emb.astype('float32'), 3)
-        return "\n".join([self.memoria['textos'][i] for i in indices[0] if i != -1])
+        # Busca por similaridade (quando FAISS/embeddings estiverem ativos)
+        if self.embedder is not None and self.index is not None:
+            emb = self.embedder.encode([pergunta])
+            _, indices = self.index.search(emb.astype('float32'), 3)
+            return "\n".join([self.memoria['textos'][i] for i in indices[0] if i != -1])
+        return f"Dados Estatísticos: {json.dumps(self.memoria.get('estatisticas', {}))}"
 
     def _carregar_estado(self):
-        if os.path.exists(f"{self.caminho_base}\\jogos.pkl"):
-            with open(f"{self.caminho_base}\\jogos.pkl", 'rb') as f:
+        caminho_pkl = os.path.join(self.caminho_base, "jogos.pkl")
+        caminho_index = os.path.join(self.caminho_base, "jogos.index")
+        if os.path.exists(caminho_pkl):
+            with open(caminho_pkl, 'rb') as f:
                 self.memoria = pickle.load(f)
-            if os.path.exists(f"{self.caminho_base}.index"):
-                self.index = faiss.read_index(f"{self.caminho_base}.index")
+            if faiss is not None and self.embedder is not None and os.path.exists(caminho_index):
+                self.index = faiss.read_index(caminho_index)
 
     

@@ -1,10 +1,22 @@
-# Ignorar arquivo 
+# Credenciais e segredos (nunca versionar)
+.env
 src/login.txt
 src/api_deepseek.txt
 
-# Outras linhas que já existem...
+# Ambientes virtuais e caches
 __pycache__/
 *.pyc
-.env
-.vscode/
 .venv/
+venv/
+.vscode/
+
+# Arquivos temporários de execução
+db/ss/*.PNG
+db/ss/*.png
+db/ss/*.xml
+db/config_automacao.json
+db/config_robo_copy.json
+db/comunicacao_app.json
+
+codigos.txt
+legacy/codigos.txt
