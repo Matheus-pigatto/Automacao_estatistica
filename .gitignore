@@ -20,3 +20,6 @@ db/comunicacao_app.json
 
 codigos.txt
 legacy/codigos.txt
+
+db/valecap.db*
+db/robo.log*

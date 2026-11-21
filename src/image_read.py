@@ -15,7 +15,8 @@ pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 def extrair_cartela_ocr_1440(imagem_path: str) -> dict:
     """
     Extrai o número do título e as 20 dezenas diretamente de um screenshot 1440x2560
-    usando as coordenadas exatas da grade atual do Vale Cap (fallback imune a animações do XML).
+    detectando dinamicamente a caixa azul do título e os 20 círculos das dezenas
+    (imune a deslocamentos verticais e animações do XML).
     """
     img = cv2.imread(imagem_path)
     if img is None:
@@ -25,45 +26,104 @@ def extrair_cartela_ocr_1440(imagem_path: str) -> dict:
     if (w, h) != (1440, 2560):
         img = cv2.resize(img, (1440, 2560), interpolation=cv2.INTER_CUBIC)
 
-    # 1. Título na caixa azul superior
-    roi_t = img[550:645, 505:845]
+    # 1. Detecta a caixa azul do título ("Número do titulo") dinamicamente por cor
+    b, g, r = cv2.split(img[:1000, :])
+    mask_azul = ((b > 140) & (g > 60) & (g < 150) & (r < 40)).astype(np.uint8) * 255
+    cnts, _ = cv2.findContours(mask_azul, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+
+    bx, by, bw, bh = 558, 386, 258, 114
+    for c in cnts:
+        x, y, cw, ch = cv2.boundingRect(c)
+        if cw > 150 and ch > 60:
+            bx, by, bw, bh = x, y, cw, ch
+            break
+
+    # Título fica na metade inferior da caixa azul
+    roi_t = img[by + int(bh * 0.35) : by + bh - 4, bx + 6 : bx + bw - 6]
     gray_t = cv2.cvtColor(roi_t, cv2.COLOR_BGR2GRAY)
-    gray_t = cv2.resize(gray_t, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    gray_t = cv2.resize(gray_t, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     _, th_t = cv2.threshold(gray_t, 180, 255, cv2.THRESH_BINARY_INV)
     txt_t = pytesseract.image_to_string(
         th_t, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789."
     ).strip().replace(" ", "")
 
-    # 2. Grade 4x5 das 20 dezenas (coordenadas exatas da tela 1440x2560)
+    # 2. Detecta os 20 círculos logo abaixo da caixa azul (filtra apenas círculos de fundo branco)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    xs = [82, 375, 668, 961, 1254]
-    ys = [736, 872, 1008, 1144]
+    y_topo_grade = by + bh + 20
+    y_fim_grade = min(2560, y_topo_grade + 600)
+    roi_grade = gray[y_topo_grade:y_fim_grade, :]
+
+    circles = cv2.HoughCircles(
+        roi_grade,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=80,
+        param1=50,
+        param2=25,
+        minRadius=30,
+        maxRadius=58,
+    )
+
+    pts = []
+    if circles is not None:
+        for cx, cy, rad in circles[0]:
+            icx, icy, irad = int(round(cx)), int(round(cy + y_topo_grade)), int(round(rad))
+            # Garante que está dentro da área branca da cartela (rejeita botão azul inferior)
+            if 0 <= icy < 2560 and 0 <= icx < 1440 and gray[icy, icx] > 180:
+                pts.append((icx, icy, irad))
+        pts.sort(key=lambda p: (round(p[1] / 60), p[0]))
+        if len(pts) > 20:
+            pts = pts[:20]
+
+    if len(pts) != 20:
+        # Fallback geométrico ancorado na caixa azul
+        xs_padrao = [100, 411, 721, 1029, 1340]
+        ys_padrao = [by + bh + 103 + i * 102 for i in range(4)]
+        pts = [(cx, cy, 38) for cy in ys_padrao for cx in xs_padrao]
+
     faixas = [(1, 15), (16, 30), (31, 45), (46, 60)]
-
     dezenas = []
+    vistas = set()
     todas_validas = True
-    for linha_idx, y in enumerate(ys):
-        vmin, vmax = faixas[linha_idx]
-        for x in xs:
-            roi = gray[y + 14 : y + 90, x + 14 : x + 90]
-            roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-            roi = cv2.copyMakeBorder(roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-            _, th = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            txt = pytesseract.image_to_string(
-                th, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
-            ).strip()
 
-            if txt.isdigit() and vmin <= int(txt) <= vmax:
-                dezenas.append(txt.zfill(2))
-            else:
-                txt2 = pytesseract.image_to_string(
-                    th, config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789"
+    for idx, (cx, cy, rad) in enumerate(pts):
+        linha_idx = idx // 5
+        vmin, vmax = faixas[linha_idx]
+        lido = None
+
+        for delta_meia in (0, 2, -2):
+            meia = max(20, int(rad * 0.72) + delta_meia)
+            roi = gray[max(0, cy - meia) : min(2560, cy + meia), max(0, cx - meia) : min(1440, cx + meia)]
+            roi = cv2.resize(roi, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+            roi_pad = cv2.copyMakeBorder(roi, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255)
+
+            _, th_otsu = cv2.threshold(roi_pad, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, th_170 = cv2.threshold(roi_pad, 170, 255, cv2.THRESH_BINARY)
+
+            tentativas_ocr = (
+                ((th_170, 7), (th_otsu, 7), (th_170, 6), (th_otsu, 6), (th_170, 8))
+                if delta_meia == 0
+                else ((th_170, 7), (th_otsu, 7))
+            )
+            for img_bin, psm in tentativas_ocr:
+                txt = pytesseract.image_to_string(
+                    img_bin, config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789"
                 ).strip()
-                if txt2.isdigit() and vmin <= int(txt2) <= vmax:
-                    dezenas.append(txt2.zfill(2))
-                else:
-                    todas_validas = False
-                    dezenas.append(None)
+                if txt.isdigit() and vmin <= int(txt) <= vmax:
+                    cand = txt.zfill(2)
+                    if cand not in vistas:
+                        lido = cand
+                        break
+            if lido is not None:
+                break
+
+        if lido is not None:
+            vistas.add(lido)
+            dezenas.append(lido)
+        else:
+            todas_validas = False
+            dezenas.append(None)
 
     validas = [d for d in dezenas if d is not None]
     sucesso = todas_validas and len(validas) == 20 and len(set(validas)) == 20
