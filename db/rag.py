@@ -276,7 +276,7 @@ class SorteioRAG:
             "ganho_rag": res["ganho_rag"],
         }
 
-    def simular_monte_carlo(self, dezenas_cartela, num_simulacoes=10000, usar_pesos_rag=True):
+    def simular_monte_carlo(self, dezenas_cartela, num_simulacoes=20000, usar_pesos_rag=True):
         """
         Simulação de Monte Carlo vetorizada usando os pesos estatísticos do RAG
         (frequência, tendência recente e atraso) comparada à linha de base uniforme.

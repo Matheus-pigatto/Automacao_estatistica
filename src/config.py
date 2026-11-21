@@ -210,7 +210,7 @@ ARVORE_DECISAO = {
                             "nome": "escolher_numeros_titulo",
                             "moldes": ["cartela_visivel_ancora.PNG", "atualizando_cartela.PNG"], 
                             "config": {
-                                "media_corte": 57.6,
+                                "media_corte": 57.80,
                                 "nota_corte": 11.8,
                                 "limite_tentativas": 200,
                                 "espera_entre_limite_tentativas": 300,

@@ -1,11 +1,8 @@
-import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
-import shutil
 from datetime import datetime
 from time import sleep, time
-
-import pandas as pd
 
 from adb_manipulation import (
     abrir_app_android,
@@ -31,10 +28,25 @@ from config import (
     SS_DIR,
     get_login_credenciais,
 )
+from database import (
+    atualizar_estado_robo,
+    limpar_aprovacao_pendente,
+    obter_aprovacao_pendente,
+    obter_estado_robo,
+    registrar_decisao,
+    registrar_limite_espera,
+    salvar_aprovacao_pendente,
+)
 from db.rag import SorteioRAG
 from telegram_bot import TelegramBot
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+LOG_FILE = os.path.join(DB_DIR, "robo.log")
+os.makedirs(DB_DIR, exist_ok=True)
+_handlers = [
+    logging.StreamHandler(),
+    RotatingFileHandler(LOG_FILE, maxBytes=1_500_000, backupCount=2, encoding="utf-8"),
+]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=_handlers)
 
 
 class AutomacaoADB:
@@ -45,37 +57,15 @@ class AutomacaoADB:
         self.config_ia = ARVORE_DECISAO["CARRINHO"]["PAGAMENTO"]["fluxo"][3]["fluxo"][1]["escolher_numeros_titulo"]["config"]
 
     def reportar_estado(self, percentual: int, mensagem: str) -> None:
-        """Atualiza o JSON para o Dashboard Streamlit mostrar o progresso."""
-        caminho_config = os.path.join(DB_DIR, "config_automacao.json")
-        config_atual = self.carregar_config_dashboard() or {}
+        """Atualiza o estado do robô no SQLite para o Dashboard mostrar o progresso."""
         try:
-            if os.path.exists(caminho_config):
-                path_temp = caminho_config + ".tmp"
-                config_atual["progresso"] = percentual
-                config_atual["msg_status"] = mensagem
-                with open(path_temp, "w", encoding="utf-8") as f:
-                    json.dump(config_atual, f, indent=4)
-                os.replace(path_temp, caminho_config)
+            atualizar_estado_robo(progresso=percentual, msg_status=mensagem)
             logging.info(f"📊 Progresso: {percentual}% - {mensagem}")
         except Exception as e:
             logging.error(f"Erro ao reportar estado: {e}")
 
     def carregar_config_dashboard(self):
-        path_original = os.path.join(DB_DIR, "config_automacao.json")
-        path_copia_trabalho = os.path.join(DB_DIR, "config_robo_copy.json")
-
-        if not os.path.exists(path_original):
-            return None
-
-        try:
-            shutil.copy2(path_original, path_copia_trabalho)
-            sleep(0.2)
-            if os.path.getsize(path_copia_trabalho) > 0:
-                with open(path_copia_trabalho, "r", encoding="utf-8") as f:
-                    return json.load(f)
-        except (json.JSONDecodeError, PermissionError, OSError):
-            return None
-        return None
+        return obter_estado_robo()
 
     def carregar_credenciais(self) -> tuple[str, str]:
         try:
@@ -86,19 +76,22 @@ class AutomacaoADB:
 
     def garantir_tela_inicial(self) -> str:
         """
-        Verifica em qual tela o app está. Se já estiver na cartela, retorna 'CARTELA'.
-        Se não estiver na Home, tenta voltar via botão 'Home' / Back ou reinicia o app até chegar na Home.
+        Verifica em qual tela o app está: 'CARTELA', 'CARRINHO' (Quero 1/2/4) ou 'HOME'.
+        Se estiver em outra tela intermediária, tenta voltar para a Home.
         """
-        for tentativa in range(4):
+        for tentativa in range(5):
             tree = dump_ui_xml()
             if existe_texto_na_tela(["Escolher o titulo", "Confirmar e finalizar"], tree=tree, contem=True):
                 logging.info("🎴 App já está aberto na tela da cartela! Indo direto para análise...")
                 return "CARTELA"
+            if existe_texto_na_tela(["Quero 1", "Quero 2", "Outra quantidade"], tree=tree, contem=True):
+                logging.info("🛒 App está na tela de seleção de quantidade (Carrinho).")
+                return "CARRINHO"
             if existe_texto_na_tela(["Seu saldo", "Olá ", "Acessar conta", "Participe e Concorra"], tree=tree, contem=True):
                 return "HOME"
             if clicar_por_texto("Home", timeout=2, contem=False, delay_pos=1.5):
                 continue
-            logging.info(f"↩️ App fora da Home (tentativa {tentativa + 1}/4). Fechando modal / voltando...")
+            logging.info(f"↩️ App fora da Home (tentativa {tentativa + 1}/5). Fechando modal / voltando...")
             if not clicar_por_texto("Fechar", timeout=2, contem=False, delay_pos=1.5):
                 from adb_manipulation import _run_adb
                 _run_adb(["shell", "input", "keyevent", "4"])
@@ -230,6 +223,8 @@ class AutomacaoADB:
             sleep(3.0)
 
             aprovado = self.processar_ciclo_ia(titulo_idx=i, qtd_total=qtd_total)
+            if aprovado == "REINICIAR_FLUXO":
+                return "REINICIAR_FLUXO"
             if not aprovado:
                 logging.warning(f"⚠️ Título {i} não foi confirmado.")
                 return False
@@ -248,10 +243,12 @@ class AutomacaoADB:
                     partes.append(t)
         return " | ".join(dict.fromkeys(partes)) or "Aviso de limite/espera"
 
-    def _tratar_avisos_xml(self, tree, cartelas_ate_aviso: int) -> bool:
+    def _tratar_avisos_xml(self, tree, cartelas_ate_aviso: int) -> str | bool:
         """
-        Detecta pop-ups de limite/espera no XML, registra quantas cartelas foram lidas
-        até o bloqueio e mede o tempo real necessário até o app liberar novamente.
+        Detecta pop-ups de limite/espera no XML.
+        Quando o app retorna para a tela de Carrinho (Quero 1/2/4) ou Home após fechar o aviso,
+        aguarda a janela de resfriamento (20s) e sinaliza 'REINICIAR_FLUXO' para retornar ao início
+        e entrar novamente na escolha de cartelas.
         """
         if not existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree, contem=True):
             return False
@@ -259,52 +256,23 @@ class AutomacaoADB:
         texto_aviso = self._extrair_texto_aviso(tree)
         inicio_ts = datetime.now()
         t0 = time()
-        delay_max = int(self.config_ia.get("delay_bloqueio", 900))
 
         logging.warning(
             f"⏳ AVISO DE ESPERA após {cartelas_ate_aviso} cartelas! "
-            f"Texto: '{texto_aviso}' | Monitorando tempo real de liberação..."
+            f"Texto: '{texto_aviso}' | Fechando aviso e reiniciando fluxo..."
         )
         self.reportar_estado(
             80,
-            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Medindo tempo de espera...",
+            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Aguardando 20s para reiniciar...",
         )
         self.telegram.enviar_mensagem(
             f"⏳ <b>Aviso de espera detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
-            f"Mensagem: <i>{texto_aviso}</i>\nMonitorando tempo até liberar..."
+            f"Mensagem: <i>{texto_aviso}</i>\nAguardando 20s e voltando para a tela inicial..."
         )
 
         clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
-
-        # Sonda a cada 20s até a tela voltar a aceitar troca de cartela sem novo aviso
-        intervalo_sonda = 20
-        tempo_espera_s = 0
-        while True:
-            sleep(intervalo_sonda)
-            tempo_espera_s = int(time() - t0)
-            self.reportar_estado(
-                80,
-                f"⏳ Em espera há {tempo_espera_s}s (após {cartelas_ate_aviso} cartelas)...",
-            )
-
-            # Tenta atualizar a cartela para testar se o limite já foi liberado
-            clicar_atualizar_cartela()
-            sleep(2.5)
-            tree_sonda = dump_ui_xml()
-            if tree_sonda is None:
-                continue
-
-            if existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree_sonda, contem=True):
-                clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=4, contem=True, delay_pos=1.0)
-                if tempo_espera_s >= delay_max:
-                    logging.warning(f"⏰ Tempo máximo ({delay_max}s) atingido ainda sob aviso.")
-                    break
-                continue
-
-            dados_teste = extrair_cartela_xml(tree_sonda)
-            if dados_teste.get("status") == "sucesso":
-                logging.info(f"✅ Seleção liberada novamente após {tempo_espera_s}s!")
-                break
+        sleep(20)
+        tempo_espera_s = int(time() - t0)
 
         salvar_log_limite_espera(
             timestamp_aviso=inicio_ts.strftime("%Y-%m-%d %H:%M:%S"),
@@ -312,11 +280,18 @@ class AutomacaoADB:
             tempo_espera_s=tempo_espera_s,
             texto_aviso=texto_aviso,
         )
-        self.telegram.enviar_mensagem(
-            f"✅ <b>Seleção liberada!</b>\n"
-            f"Cartelas antes do aviso: <b>{cartelas_ate_aviso}</b>\n"
-            f"Tempo real de espera: <b>{tempo_espera_s}s</b> ({tempo_espera_s / 60:.1f} min)"
-        )
+
+        # Verifica se o app voltou para Carrinho/Home (comportamento padrão após o aviso)
+        tree_pos = dump_ui_xml()
+        if existe_texto_na_tela(["Quero 1", "Quero 2", "Outra quantidade", "Participe e Concorra", "Seu saldo"], tree=tree_pos, contem=True):
+            logging.info("🔄 App voltou para Carrinho/Home após aviso. Retornando para a tela inicial e reentrando...")
+            self.telegram.enviar_mensagem(
+                f"🔄 <b>Reiniciando busca</b> após {tempo_espera_s}s de espera (app voltou ao Carrinho/Home)."
+            )
+            return "REINICIAR_FLUXO"
+
+        # Se por acaso ainda estiver na tela da cartela, apenas continua
+        self.telegram.enviar_mensagem(f"✅ <b>Seleção liberada!</b> Tempo de espera: <b>{tempo_espera_s}s</b>.")
         return True
 
     def processar_ciclo_ia(self, titulo_idx: int = 1, qtd_total: int = 1) -> bool:
@@ -331,10 +306,8 @@ class AutomacaoADB:
         logging.info(f"🚀 Iniciando análise de cartelas via XML + Monte Carlo RAG (Título {titulo_idx}/{qtd_total})...")
 
         while tentativas < limite_tentativas:
-            # Toca antes em uma área neutra para dispensar a mãozinha antes de coletar o XML
+            # Toca na área neutra e já dispara a leitura do XML logo em seguida
             tap_adb(720, 1600, random_offset=10)
-            sleep(0.6)
-
             tree = dump_ui_xml()
             if tree is None:
                 falhas_seguidas += 1
@@ -344,23 +317,62 @@ class AutomacaoADB:
                 sleep(1.5)
                 continue
 
-            if self._tratar_avisos_xml(tree, cartelas_ate_aviso):
+            aviso_res = self._tratar_avisos_xml(tree, cartelas_ate_aviso)
+            if aviso_res == "REINICIAR_FLUXO":
+                return "REINICIAR_FLUXO"
+            if aviso_res:
                 cartelas_ate_aviso = 0
                 repeticoes_seguidas = 0
                 continue
 
             dados_cartela = extrair_cartela_xml(tree)
 
-            # Se o XML ainda vier truncado, usa screencap + OCR 1440x2560 como fallback imediato
+            # Se o XML veio parcial, mostra quais dezenas leu e tenta mais 2x (2.0s e 1.5s) antes do OCR
             if dados_cartela.get("status") != "sucesso":
-                logging.info(f"ℹ️ XML parcial ({len(dados_cartela['dezenas'])} dezenas). Lendo cartela via screencap + OCR...")
+                logging.info(
+                    f"ℹ️ XML parcial ({len(dados_cartela['dezenas'])} dezenas: {dados_cartela['dezenas']}). "
+                    f"Tocando na tela e aguardando 2s para 2ª leitura XML..."
+                )
+                tap_adb(720, 1600, random_offset=10)
+                sleep(2.0)
+                tree_retry = dump_ui_xml()
+                if tree_retry is not None:
+                    if self._tratar_avisos_xml(tree_retry, cartelas_ate_aviso):
+                        cartelas_ate_aviso = 0
+                        repeticoes_seguidas = 0
+                        continue
+                    dados_cartela = extrair_cartela_xml(tree_retry)
+
+            if dados_cartela.get("status") != "sucesso":
+                logging.info(
+                    f"ℹ️ 2ª leitura XML parcial ({len(dados_cartela['dezenas'])} dezenas: {dados_cartela['dezenas']}). "
+                    f"Aguardando 1.5s para 3ª leitura XML..."
+                )
+                sleep(1.5)
+                tree_retry2 = dump_ui_xml()
+                if tree_retry2 is not None:
+                    if self._tratar_avisos_xml(tree_retry2, cartelas_ate_aviso):
+                        cartelas_ate_aviso = 0
+                        repeticoes_seguidas = 0
+                        continue
+                    dados_cartela = extrair_cartela_xml(tree_retry2)
+
+            # Se ainda assim o XML falhar, usa screencap + OCR 1440x2560 como fallback
+            if dados_cartela.get("status") != "sucesso":
+                logging.info(
+                    f"ℹ️ 3ª leitura XML parcial ({len(dados_cartela['dezenas'])} dezenas: {dados_cartela['dezenas']}). "
+                    f"Recorrendo a screencap + OCR..."
+                )
                 caminho_ss = capturar_cartela_android()
                 dados_ocr = extrair_cartela_ocr_1440(caminho_ss)
                 if dados_ocr.get("status") == "sucesso":
                     dados_cartela = dados_ocr
                 else:
                     falhas_seguidas += 1
-                    logging.warning(f"⚠️ Leitura incompleta (XML={len(dados_cartela['dezenas'])}, OCR={dados_ocr.get('dezenas')}). Tocando na tela...")
+                    logging.warning(
+                        f"⚠️ Leitura incompleta (XML={dados_cartela.get('dezenas')}, "
+                        f"OCR título={dados_ocr.get('titulo')}, OCR dezenas={dados_ocr.get('dezenas')}). Tocando na tela..."
+                    )
                     tap_adb(720, 1600, random_offset=10)
                     if falhas_seguidas > 5:
                         logging.error("❌ Múltiplas falhas consecutivas na leitura da cartela.")
@@ -420,14 +432,13 @@ class AutomacaoADB:
                 )
                 return True
 
-            # Toca antes em uma área neutra para limpar a mãozinha (que pode ter voltado durante o cálculo)
-            # e só então clica no botão azul de atualizar (↻)
+            # Toca antes para limpar a mãozinha, aguarda 1.5s, faz o duplo clique em ↻ (0.5s entre cliques) e aguarda 1.5s
             logging.info(f"👎 Cartela #{cartelas_ate_aviso} ({ultimo_titulo}) descartada. Limpando tela e clicando em ↻...")
             tap_adb(720, 1600, random_offset=10)
-            sleep(0.5)
+            sleep(1.5)
             clicar_atualizar_cartela(tree)
             tentativas += 1
-            sleep(2.5)
+            sleep(1.5)
 
         logging.warning("❌ Limite de tentativas atingido sem aprovação.")
         return False
@@ -443,7 +454,8 @@ class AutomacaoADB:
 
             stats = self.rag.simular_monte_carlo(dezenas_cartela=dezenas)
             media = stats.get("media", 60.0)
-            media_corte = float(self.config_ia.get("media_corte", 57.6))
+            cfg_dash = self.carregar_config_dashboard() or {}
+            media_corte = float(cfg_dash.get("media_corte", self.config_ia.get("media_corte", 57.80)))
 
             if media > media_corte:
                 salvar_log_decisao(titulo, dezenas, stats, "Rejeitado_IA")
@@ -457,33 +469,29 @@ class AutomacaoADB:
             self.comunicar_dashboard({"titulo": titulo, "dezenas": dezenas}, stats)
             self.telegram.enviar_cartela_aprovacao(titulo, dezenas, stats)
 
-            caminho_json = os.path.join(DB_DIR, "comunicacao_app.json")
             while True:
                 sleep(1.5)
                 # 1. Verifica decisão pelo Telegram (celular)
                 decisao_tg = self.telegram.verificar_decisao(titulo)
                 if decisao_tg in ("ACEITO", "DESISTIDO"):
-                    if os.path.exists(caminho_json):
-                        os.remove(caminho_json)
+                    limpar_aprovacao_pendente()
                     if decisao_tg == "ACEITO":
                         salvar_log_decisao(titulo, dezenas, stats, "Comprado_Telegram")
                         return "COMPRAR"
                     salvar_log_decisao(titulo, dezenas, stats, "Desistido_Telegram")
                     return "PROXIMA"
 
-                # 2. Verifica decisão pelo Dashboard Streamlit
-                if os.path.exists(caminho_json):
-                    with open(caminho_json, "r", encoding="utf-8") as f:
-                        dados = json.load(f)
-
+                # 2. Verifica decisão pelo Dashboard Streamlit (via SQLite)
+                dados = obter_aprovacao_pendente()
+                if dados:
                     if dados.get("status") == "ACEITO":
                         salvar_log_decisao(titulo, dezenas, stats, "Comprado")
-                        os.remove(caminho_json)
+                        limpar_aprovacao_pendente()
                         self.telegram.enviar_mensagem(f"✅ Título <code>{titulo}</code> aprovado pelo Dashboard!")
                         return "COMPRAR"
                     if dados.get("status") == "DESISTIDO":
                         salvar_log_decisao(titulo, dezenas, stats, "Desistido_Usuario")
-                        os.remove(caminho_json)
+                        limpar_aprovacao_pendente()
                         self.telegram.enviar_mensagem(f"❌ Título <code>{titulo}</code> descartado pelo Dashboard.")
                         return "PROXIMA"
 
@@ -492,61 +500,27 @@ class AutomacaoADB:
             return "PROXIMA"
 
     def comunicar_dashboard(self, dados_cartela: dict, stats: dict) -> None:
-        caminho_temp = os.path.join(DB_DIR, "comunicacao_app.json")
-        payload = {
-            "timestamp": datetime.now().isoformat(),
-            "id_cartela": dados_cartela.get("titulo", "desconhecido"),
-            "dezenas": dados_cartela.get("dezenas", []),
-            "media": stats.get("media"),
-            "media_pura": stats.get("media_pura"),
-            "ganho_rag": stats.get("ganho_rag"),
-            "prob_50": stats.get("prob_50"),
-            "prob_55": stats.get("prob_55"),
-            "pure_score": stats.get("pure_score"),
-            "weighted_score": stats.get("weighted_score"),
-            "resumo_dezenas": stats.get("resumo_dezenas", {}),
-            "monte_carlo_data": stats.get("monte_carlo_data"),
-            "status": "aguardando_aprovacao",
-        }
-        with open(caminho_temp, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
+        salvar_aprovacao_pendente(
+            dados_cartela.get("titulo", "desconhecido"),
+            dados_cartela.get("dezenas", []),
+            stats,
+        )
 
 
 def salvar_log_limite_espera(timestamp_aviso: str, cartelas_ate_aviso: int, tempo_espera_s: int, texto_aviso: str):
-    """Registra quantas cartelas foram lidas até o aviso de espera e quanto tempo levou para liberar."""
-    arquivo = os.path.join(DB_DIR, "log_limites_espera.csv")
-    df = pd.DataFrame([{
-        "Timestamp_Aviso": timestamp_aviso,
-        "Cartelas_Ate_Aviso": cartelas_ate_aviso,
-        "Tempo_Espera_Segundos": tempo_espera_s,
-        "Tempo_Espera_Minutos": round(tempo_espera_s / 60.0, 2),
-        "Texto_Aviso": texto_aviso,
-    }])
-    if not os.path.exists(arquivo):
-        df.to_csv(arquivo, index=False, sep=";")
-    else:
-        df.to_csv(arquivo, mode="a", header=False, index=False, sep=";")
+    """Registra no SQLite quantas cartelas foram lidas até o aviso de espera e quanto tempo levou."""
+    registrar_limite_espera(timestamp_aviso, cartelas_ate_aviso, tempo_espera_s, texto_aviso)
 
 
 def salvar_log_decisao(id_ref, dezenas, scores, decisao):
-    """Gera o CSV de aprendizado/auditoria de decisões."""
-    data_str = datetime.now().strftime("%Y-%m-%d")
-    arquivo = os.path.join(DB_DIR, f"{data_str}_log_decisoes.csv")
-
-    novo_log = {
-        "ID_Cartela": id_ref,
-        "Dezenas": str(dezenas),
-        "Pure_Score": scores["pure_score"],
-        "Weighted_Score": scores["weighted_score"],
-        "Decisao": decisao,
-        "Hora": datetime.now().strftime("%H:%M:%S"),
-    }
-
-    df = pd.DataFrame([novo_log])
-    if not os.path.exists(arquivo):
-        df.to_csv(arquivo, index=False, sep=";")
-    else:
-        df.to_csv(arquivo, mode="a", header=False, index=False, sep=";")
+    """Registra a decisão da cartela no SQLite."""
+    registrar_decisao(
+        id_ref,
+        dezenas,
+        scores.get("pure_score", 0.0),
+        scores.get("weighted_score", 0.0),
+        decisao,
+    )
 
 
 def limparFotos():
@@ -591,20 +565,33 @@ def main():
         if config.get("status") == "PROCESSANDO":
             logging.info("⚡ Comando de início detectado pelo Dashboard!")
 
-            tela = robo.garantir_tela_inicial()
-            if tela == "CARTELA":
-                qtd = int(config.get("quantidade", 1))
-                robo.processar_ciclo_ia(titulo_idx=1, qtd_total=qtd)
-                logging.info("✅ Missão concluída (iniciada direto na cartela)!")
-            elif robo.realizar_login() and robo.entrar_area_compra():
-                robo.iniciar_por_dashboard()
-                logging.info("✅ Missão concluída!")
+            while True:
+                cfg_loop = robo.carregar_config_dashboard()
+                if not cfg_loop or cfg_loop.get("status") != "PROCESSANDO":
+                    logging.info("🛑 Execução interrompida pelo usuário.")
+                    break
 
-            config["status"] = "CONCLUIDO"
-            config["progresso"] = 100
-            config["msg_status"] = "Concluído"
-            with open(os.path.join(DB_DIR, "config_automacao.json"), "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4)
+                tela = robo.garantir_tela_inicial()
+                if tela == "CARTELA":
+                    qtd = int(cfg_loop.get("quantidade", 1))
+                    resultado = robo.processar_ciclo_ia(titulo_idx=1, qtd_total=qtd)
+                elif tela == "CARRINHO":
+                    resultado = robo.iniciar_por_dashboard()
+                else:
+                    if robo.realizar_login() and robo.entrar_area_compra():
+                        resultado = robo.iniciar_por_dashboard()
+                    else:
+                        resultado = False
+
+                if resultado == "REINICIAR_FLUXO":
+                    logging.info("🔄 Retornando para a tela inicial/carrinho e reiniciando busca...")
+                    clicar_por_texto("Home", timeout=3, contem=False, delay_pos=1.5)
+                    continue
+
+                logging.info("✅ Missão concluída!")
+                break
+
+            atualizar_estado_robo(status="CONCLUIDO", progresso=100, msg_status="Concluído")
             break
 
         sleep(3)
