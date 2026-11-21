@@ -80,15 +80,15 @@ class SistemaUnificado:
                 st.markdown("### Parâmetros de Busca")
                 tipo_jogo = st.radio(label="Tipo de Jogo:", 
                                     options =["Vale Cap", "Hiper Cap"], 
-                                    index=False,
+                                    index=0,
                                     horizontal=True) # Exemplo de switch rápido
                 tipo_jogo = tipo_jogo.lower().replace(" ", "")
                 if tipo_jogo == "hipercap":
                     
-                    qtd = st.radio(label=" Quantidade de cartelas:", options =[2, 5, 10], index=False, horizontal=True)
+                    qtd = st.radio(label=" Quantidade de cartelas:", options =[2, 5, 10], index=0, horizontal=True)
                 else:
                     
-                    qtd = st.radio(label="Quantidade de cartelas:", options =[1, 2, 4], index=False, horizontal=True)
+                    qtd = st.radio(label="Quantidade de cartelas:", options =[1, 2, 4], index=0, horizontal=True)
                     
                 if st.button("Iniciar Busca", key="start", use_container_width=True):
                     proc_existente = st.session_state.get("robo_processo")
