@@ -10,6 +10,68 @@ from config import TESSERACT_CMD
 
 # Caminho para o executável do Tesseract (configurável via .env -> TESSERACT_CMD)
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+
+
+def extrair_cartela_ocr_1440(imagem_path: str) -> dict:
+    """
+    Extrai o número do título e as 20 dezenas diretamente de um screenshot 1440x2560
+    usando as coordenadas exatas da grade atual do Vale Cap (fallback imune a animações do XML).
+    """
+    img = cv2.imread(imagem_path)
+    if img is None:
+        return {"titulo": "desconhecido", "dezenas": [], "status": "alerta_falha_leitura"}
+
+    h, w = img.shape[:2]
+    if (w, h) != (1440, 2560):
+        img = cv2.resize(img, (1440, 2560), interpolation=cv2.INTER_CUBIC)
+
+    # 1. Título na caixa azul superior
+    roi_t = img[550:645, 505:845]
+    gray_t = cv2.cvtColor(roi_t, cv2.COLOR_BGR2GRAY)
+    gray_t = cv2.resize(gray_t, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    _, th_t = cv2.threshold(gray_t, 180, 255, cv2.THRESH_BINARY_INV)
+    txt_t = pytesseract.image_to_string(
+        th_t, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789."
+    ).strip().replace(" ", "")
+
+    # 2. Grade 4x5 das 20 dezenas (coordenadas exatas da tela 1440x2560)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    xs = [82, 375, 668, 961, 1254]
+    ys = [736, 872, 1008, 1144]
+    faixas = [(1, 15), (16, 30), (31, 45), (46, 60)]
+
+    dezenas = []
+    todas_validas = True
+    for linha_idx, y in enumerate(ys):
+        vmin, vmax = faixas[linha_idx]
+        for x in xs:
+            roi = gray[y + 14 : y + 90, x + 14 : x + 90]
+            roi = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            roi = cv2.copyMakeBorder(roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+            _, th = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            txt = pytesseract.image_to_string(
+                th, config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
+            ).strip()
+
+            if txt.isdigit() and vmin <= int(txt) <= vmax:
+                dezenas.append(txt.zfill(2))
+            else:
+                txt2 = pytesseract.image_to_string(
+                    th, config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789"
+                ).strip()
+                if txt2.isdigit() and vmin <= int(txt2) <= vmax:
+                    dezenas.append(txt2.zfill(2))
+                else:
+                    todas_validas = False
+                    dezenas.append(None)
+
+    validas = [d for d in dezenas if d is not None]
+    sucesso = todas_validas and len(validas) == 20 and len(set(validas)) == 20
+    return {
+        "titulo": txt_t or "desconhecido",
+        "dezenas": validas if sucesso else dezenas,
+        "status": "sucesso" if sucesso else "alerta_falha_leitura",
+    }
 def nada(x):
     # Função obrigatória para o Trackbar, mas não precisa fazer nada
     pass

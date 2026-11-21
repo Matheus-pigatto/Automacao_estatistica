@@ -86,13 +86,21 @@ class SorteioRAG:
         sorteios = self.memoria['objetos_sorteio']
         if not sorteios: return
 
-        todos_numeros = [n for s in sorteios for n in s.numeros]
+        def _chave_data(s):
+            try:
+                return (datetime.strptime(str(s.data), "%d/%m/%Y"), str(s.concurso))
+            except Exception:
+                return (datetime.min, str(s.concurso))
+
+        sorteios_ordenados = sorted(sorteios, key=_chave_data)
+        self.memoria['objetos_sorteio'] = sorteios_ordenados
+        todos_numeros = [n for s in sorteios_ordenados for n in s.numeros]
         
         # 1. Estatísticas Básicas
         self.memoria['estatisticas'] = {
             'frequencia': dict(Counter(todos_numeros).most_common(20)),
-            'total_jogos': len(sorteios),
-            'ultimo_concurso': sorteios[-1].concurso
+            'total_jogos': len(sorteios_ordenados),
+            'ultimo_concurso': sorteios_ordenados[-1].concurso
         }
 
         # 2. Métricas Avançadas (Markov, Erlang, Regressão)

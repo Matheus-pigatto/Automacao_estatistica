@@ -70,9 +70,6 @@ class SistemaUnificado:
 
         st.subheader(body="🤖   Automações do Sistema Vale Cap", divider="grey")
 
-        # 1. Pop-up de Monitoramento (Prioridade Máxima)
-        pendente = self.monitorar_automacao()
-
         col1, col2 = st.columns(2)
 
         with col1:
@@ -116,17 +113,17 @@ class SistemaUnificado:
 
 
             if st.button("📊  Atualizar estatísticas", key="update", use_container_width=True):
-                with st.spinner("Atualizando informações..."):
-                    caminho_csv = os.path.join(PROJECT_ROOT, "historico_vale_cap.csv")
-                    if not os.path.exists(caminho_csv):
-                        st.error(f"Arquivo '{caminho_csv}' não encontrado.")
-                    else:
-                        qtd_novos = st.session_state.rag.sincronizar_com_csv(caminho_csv) or 0
-                        if qtd_novos > 0:
-                            st.success(f"Sucesso! {qtd_novos} novos sorteios integrados e estatísticas recalculadas.")
-                        else:
-                            st.info("A base já estava atualizada.")
-                        st.session_state.expandido_estatistica = True
+                with st.spinner("Buscando novos sorteios no Portal R3 e recalculando RAG..."):
+                    from webScrapy import atualizar_base_portal_r3
+                    resumo = atualizar_base_portal_r3(max_paginas=2)
+                    get_rag.clear()
+                    st.session_state.rag = get_rag()
+                    st.success(
+                        f"Base atualizada até **{resumo['ultima_data']}**! "
+                        f"Total: **{resumo['total_sorteios']}** sorteios "
+                        f"(+{resumo['novos_sorteios_csv']} novos)."
+                    )
+                    st.rerun()
             
             if st.button("📊  Visualizar tabela de jogos ", key="table", use_container_width=True):
                 st.session_state.tabela_jogos_historico = not st.session_state.tabela_jogos_historico
@@ -154,8 +151,20 @@ class SistemaUnificado:
                     #with st.container(border=True):
                         #self.painel_simulado()
             
-            if st.button("🔄 Atualizar Status Manualmente"):
+            if st.button("🔄 Atualizar Status Manualmente", use_container_width=True):
                 st.rerun()
+
+            if st.button("🛑 Encerrar Busca", key="stop_busca", type="primary", use_container_width=True):
+                qtd_encerrados = self.encerrar_busca()
+                if qtd_encerrados > 0:
+                    st.warning(f"🛑 Busca encerrada ({qtd_encerrados} processo(s) finalizado(s)).")
+                else:
+                    st.info("ℹ️ Nenhuma busca ativa encontrada. Status redefinido para AGUARDANDO.")
+                st.rerun()
+
+        if st.session_state.get('expandido_jogos_simulados', False):
+            st.divider()
+            self.painel_simulado()
 
         if st.session_state.get('tabela_jogos_historico', False):
             st.divider()
@@ -182,35 +191,45 @@ class SistemaUnificado:
 
         st.divider()
         
-        st.subheader("🤖 Controle do Robô")
+        st.subheader("🛰️ Monitorização em Tempo Real")
+        monitorar = st.checkbox("Monitorar Robô em Tempo Real (atualiza a cada 3s)")
 
-        # ÁREA DA BARRA DE PROGRESSO
-        st.subheader("🛰️ Monitorização em Tempo Real",)
-        monitorar = st.checkbox("Monitorar Robô em Tempo Real")
-        if monitorar:
-            time.sleep(10) # Espera 2 segundos antes de recarregar
-            st.rerun()
-        col_prog, col_msg = st.columns([1, 3])
-
-        # Criamos espaços vazios que serão preenchidos pelo loop
-        barra_progresso = st.progress(0)
-        texto_progresso = st.empty()
-
-        # Função para ler o estado atual
-        def obter_progresso_atual():
+        def render_monitor():
+            dados = {"progresso": 0, "status": "AGUARDANDO", "msg_status": "Aguardando início..."}
             if os.path.exists(PATH_CONFIG):
                 try:
-                    with open(PATH_CONFIG, "r") as f:
-                        return json.load(f)
-                except:
+                    with open(PATH_CONFIG, "r", encoding="utf-8") as f:
+                        dados = json.load(f)
+                except Exception:
                     pass
-            return {"progresso": 0, "msg_status": "A aguardar início..."}
 
-        # Loop de atualização automática (Fragmento ou Simples)
-        # Nota: O Streamlit atualizará isto sempre que o script rodar ou via st.empty
-        dados = obter_progresso_atual()
-        barra_progresso.progress(dados["progresso"])
-        texto_progresso.write(f"**Estado:** {dados['msg_status']}")
+            progresso_val = max(0, min(100, int(dados.get("progresso", 0))))
+            st.progress(progresso_val)
+            st.write(f"**Status:** `{dados.get('status', 'AGUARDANDO')}` | **Estado:** {dados.get('msg_status', 'Aguardando...')}")
+
+            # Mostra resumo ao vivo das cartelas testadas hoje
+            log_hoje = os.path.join(DB_DIR, f"{datetime.now().strftime('%Y-%m-%d')}_log_decisoes.csv")
+            if os.path.exists(log_hoje):
+                try:
+                    df_hoje = pd.read_csv(log_hoje, sep=";")
+                    if not df_hoje.empty:
+                        ultima = df_hoje.iloc[-1]
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Cartelas Testadas Hoje", len(df_hoje))
+                        c2.metric("Última Cartela", str(ultima.get("ID_Cartela", "-")))
+                        c3.metric("Último Score RAG", f"{float(ultima.get('Weighted_Score', 0)):.2f}")
+                except Exception:
+                    pass
+
+            self.monitorar_automacao()
+
+        if monitorar:
+            @st.fragment(run_every=3)
+            def _monitor_fragment():
+                render_monitor()
+            _monitor_fragment()
+        else:
+            render_monitor()
 
 
         st.divider()
@@ -277,14 +296,84 @@ class SistemaUnificado:
                 st.json(rag_local.memoria['metricas_avancadas'])
 
     def painel_simulado(self):
-        pass
-        #"""Exemplo: limpar arquivos temporários"""
-        #if os.name == 'nt':  # Windows
-        #    os.system('cleanmgr /sagerun:1')
-        #    st.info("Limpeza de disco iniciada no Windows")
-        #else:  # Linux/Mac
-        #    os.system('sudo apt-get autoremove -y')
-        #    st.info("Limpeza de sistema iniciada")
+        """Exibe todas as cartelas testadas no Monte Carlo (pontuação, decisão e dezenas) e logs de espera."""
+        st.write("### 🗃️ Painel de Cartelas Simuladas (Monte Carlo RAG)")
+
+        arquivos_log = sorted(
+            [f for f in os.listdir(DB_DIR) if f.endswith("_log_decisoes.csv")],
+            reverse=True,
+        )
+
+        if not arquivos_log:
+            st.info("Nenhuma cartela foi simulada ainda. Inicie uma busca para ver os resultados aqui.")
+        else:
+            arquivo_sel = st.selectbox("Selecione o dia do log:", arquivos_log, index=0)
+            caminho_log = os.path.join(DB_DIR, arquivo_sel)
+            try:
+                df_sim = pd.read_csv(caminho_log, sep=";")
+                if not df_sim.empty:
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Cartelas Testadas", len(df_sim))
+                    c2.metric("Melhor Score RAG", f"{df_sim['Weighted_Score'].max():.2f}")
+                    c3.metric("Média Score RAG", f"{df_sim['Weighted_Score'].mean():.2f}")
+                    aprovadas = df_sim["Decisao"].astype(str).str.contains("Comprado", case=False).sum()
+                    c4.metric("Aprovadas", int(aprovadas))
+
+                    # Mostra mais recentes primeiro
+                    df_exib = df_sim.iloc[::-1].reset_index(drop=True)
+                    st.dataframe(df_exib, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Arquivo de log vazio.")
+            except Exception as e:
+                st.error(f"Erro ao ler log de simulações: {e}")
+
+        # Exibe também o monitor de avisos de espera, se existir
+        caminho_espera = os.path.join(DB_DIR, "log_limites_espera.csv")
+        if os.path.exists(caminho_espera):
+            st.write("#### ⏳ Histórico de Avisos de Limite / Espera")
+            try:
+                df_esp = pd.read_csv(caminho_espera, sep=";")
+                st.dataframe(df_esp.iloc[::-1], use_container_width=True, hide_index=True)
+            except Exception as e:
+                st.error(f"Erro ao ler log de espera: {e}")
+
+    def encerrar_busca(self) -> int:
+        """Encerra o processo do robô (session_state e quaisquer instâncias órfãs de automacao_adb.py)."""
+        encerrados = 0
+        proc = st.session_state.get("robo_processo")
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            encerrados += 1
+        st.session_state["robo_processo"] = None
+
+        # Garante encerramento de qualquer processo automacao_adb.py órfão no Windows
+        try:
+            cmd = (
+                "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                "| Where-Object { $_.CommandLine -like '*automacao_adb.py*' } "
+                "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }"
+            )
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=8)
+            pids = [l.strip() for l in res.stdout.splitlines() if l.strip().isdigit()]
+            encerrados += len(pids)
+        except Exception:
+            pass
+
+        salvar_config_seguro({"progresso": 0, "status": "PARADO", "msg_status": "Busca encerrada pelo usuário"})
+        caminho_com = os.path.join(DB_DIR, "comunicacao_app.json")
+        if os.path.exists(caminho_com):
+            try:
+                os.remove(caminho_com)
+            except Exception:
+                pass
+        return encerrados
 
     def pagina_sistema(self):
         """Página de status e controle de processo do sistema"""
@@ -294,10 +383,8 @@ class SistemaUnificado:
 
         if em_execucao:
             st.success(f"🟢 Robô ADB em execução (PID: {proc.pid})")
-            if st.button("🛑 Parar Robô", type="primary"):
-                proc.terminate()
-                st.session_state["robo_processo"] = None
-                salvar_config_seguro({"progresso": 0, "status": "AGUARDANDO", "msg_status": "Parado pelo usuário"})
+            if st.button("🛑 Encerrar Busca", type="primary"):
+                self.encerrar_busca()
                 st.rerun()
         else:
             st.info("⚪ Nenhum processo de robô em execução.")

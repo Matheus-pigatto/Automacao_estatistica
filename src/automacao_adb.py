@@ -9,6 +9,8 @@ import pandas as pd
 
 from adb_manipulation import (
     abrir_app_android,
+    capturar_cartela_android,
+    clicar_atualizar_cartela,
     clicar_por_texto,
     dump_ui_xml,
     encontrar_no_xml,
@@ -20,6 +22,7 @@ from adb_manipulation import (
     swipe_adb,
     tap_adb,
 )
+from image_read import extrair_cartela_ocr_1440
 from config import (
     ADB_DEVICE,
     ARVORE_DECISAO,
@@ -80,6 +83,27 @@ class AutomacaoADB:
         except Exception as e:
             logging.error(f"❌ Erro ao carregar credenciais: {e}")
             return "", ""
+
+    def garantir_tela_inicial(self) -> str:
+        """
+        Verifica em qual tela o app está. Se já estiver na cartela, retorna 'CARTELA'.
+        Se não estiver na Home, tenta voltar via botão 'Home' / Back ou reinicia o app até chegar na Home.
+        """
+        for tentativa in range(4):
+            tree = dump_ui_xml()
+            if existe_texto_na_tela(["Escolher o titulo", "Confirmar e finalizar"], tree=tree, contem=True):
+                logging.info("🎴 App já está aberto na tela da cartela! Indo direto para análise...")
+                return "CARTELA"
+            if existe_texto_na_tela(["Seu saldo", "Olá ", "Acessar conta", "Participe e Concorra"], tree=tree, contem=True):
+                return "HOME"
+            if clicar_por_texto("Home", timeout=2, contem=False, delay_pos=1.5):
+                continue
+            logging.info(f"↩️ App fora da Home (tentativa {tentativa + 1}/4). Fechando modal / voltando...")
+            if not clicar_por_texto("Fechar", timeout=2, contem=False, delay_pos=1.5):
+                from adb_manipulation import _run_adb
+                _run_adb(["shell", "input", "keyevent", "4"])
+                sleep(1.5)
+        return "HOME"
 
     def realizar_login(self) -> bool:
         """Verifica se o usuário já está logado via XML; caso contrário, faz login automático."""
@@ -263,9 +287,9 @@ class AutomacaoADB:
                 f"⏳ Em espera há {tempo_espera_s}s (após {cartelas_ate_aviso} cartelas)...",
             )
 
-            # Tenta avançar uma cartela para testar se o limite já foi liberado
-            swipe_adb(1250, 990, 200, 990, 400)
-            sleep(1.5)
+            # Tenta atualizar a cartela para testar se o limite já foi liberado
+            clicar_atualizar_cartela()
+            sleep(2.5)
             tree_sonda = dump_ui_xml()
             if tree_sonda is None:
                 continue
@@ -297,15 +321,20 @@ class AutomacaoADB:
 
     def processar_ciclo_ia(self, titulo_idx: int = 1, qtd_total: int = 1) -> bool:
         """Lê cartelas via XML, avalia com Monte Carlo RAG e troca por swipe até aprovar."""
-        limite_tentativas = int(self.config_ia.get("limite_tentativas", 100))
+        limite_tentativas = int(self.config_ia.get("limite_tentativas", 200))
         tentativas = 0
         cartelas_ate_aviso = 0
         falhas_seguidas = 0
+        repeticoes_seguidas = 0
         ultimo_titulo = None
 
         logging.info(f"🚀 Iniciando análise de cartelas via XML + Monte Carlo RAG (Título {titulo_idx}/{qtd_total})...")
 
         while tentativas < limite_tentativas:
+            # Toca antes em uma área neutra para dispensar a mãozinha antes de coletar o XML
+            tap_adb(720, 1600, random_offset=10)
+            sleep(0.6)
+
             tree = dump_ui_xml()
             if tree is None:
                 falhas_seguidas += 1
@@ -317,30 +346,67 @@ class AutomacaoADB:
 
             if self._tratar_avisos_xml(tree, cartelas_ate_aviso):
                 cartelas_ate_aviso = 0
+                repeticoes_seguidas = 0
                 continue
+
+            dados_cartela = extrair_cartela_xml(tree)
+
+            # Se o XML ainda vier truncado, usa screencap + OCR 1440x2560 como fallback imediato
+            if dados_cartela.get("status") != "sucesso":
+                logging.info(f"ℹ️ XML parcial ({len(dados_cartela['dezenas'])} dezenas). Lendo cartela via screencap + OCR...")
+                caminho_ss = capturar_cartela_android()
+                dados_ocr = extrair_cartela_ocr_1440(caminho_ss)
+                if dados_ocr.get("status") == "sucesso":
+                    dados_cartela = dados_ocr
+                else:
+                    falhas_seguidas += 1
+                    logging.warning(f"⚠️ Leitura incompleta (XML={len(dados_cartela['dezenas'])}, OCR={dados_ocr.get('dezenas')}). Tocando na tela...")
+                    tap_adb(720, 1600, random_offset=10)
+                    if falhas_seguidas > 5:
+                        logging.error("❌ Múltiplas falhas consecutivas na leitura da cartela.")
+                        return False
+                    sleep(1.5)
+                    continue
+
+            falhas_seguidas = 0
+
+            # Evita reavaliar/regravar a mesma cartela se o botão atualizar ainda estiver carregando ou overlay bloqueou
+            if ultimo_titulo is not None and dados_cartela["titulo"] == ultimo_titulo:
+                repeticoes_seguidas += 1
+                logging.warning(
+                    f"🔁 Cartela {ultimo_titulo} repetiu ({repeticoes_seguidas}x). "
+                    f"Dispensando mãozinha e clicando em ↻..."
+                )
+                tap_adb(720, 1600, random_offset=10)
+                sleep(0.5)
+                if repeticoes_seguidas % 3 == 0:
+                    swipe_adb(1300, 990, 140, 990, 600)
+                else:
+                    clicar_atualizar_cartela(tree)
+                sleep(2.5)
+
+                if repeticoes_seguidas >= 6:
+                    logging.warning(
+                        f"⏸️ Cartela {ultimo_titulo} não troca após {cartelas_ate_aviso} cartelas "
+                        f"(possível limite silencioso). Aguardando 30s antes de tentar novamente..."
+                    )
+                    self.reportar_estado(
+                        80,
+                        f"⏸️ Travado na cartela {ultimo_titulo} após {cartelas_ate_aviso} cartelas. Aguardando 30s...",
+                    )
+                    sleep(30)
+                    repeticoes_seguidas = 0
+                continue
+
+            repeticoes_seguidas = 0
+            cartelas_ate_aviso += 1
+            ultimo_titulo = dados_cartela["titulo"]
 
             self.reportar_estado(
                 85,
-                f"Analisando cartela #{cartelas_ate_aviso + 1} (Título {titulo_idx}/{qtd_total})...",
+                f"Analisando cartela #{cartelas_ate_aviso} ({ultimo_titulo}) - Título {titulo_idx}/{qtd_total}...",
             )
-            dados_cartela = extrair_cartela_xml(tree)
-            logging.info(f"🎴 Cartela XML: Título={dados_cartela['titulo']} | Dezenas={dados_cartela['dezenas']}")
-
-            if dados_cartela.get("status") != "sucesso":
-                falhas_seguidas += 1
-                # Se houver overlay da mãozinha ("arraste para o lado"), um toque na tela dispensa o overlay
-                logging.warning(f"⚠️ Leitura incompleta ({len(dados_cartela['dezenas'])} dezenas). Tocando na tela para dispensar overlay...")
-                tap_adb(720, 990, random_offset=10)
-                if falhas_seguidas > 5:
-                    logging.error("❌ Múltiplas falhas consecutivas na leitura da cartela.")
-                    return False
-                sleep(1.5)
-                continue
-
-            falhas_seguidas = 0
-            if dados_cartela["titulo"] != ultimo_titulo:
-                cartelas_ate_aviso += 1
-                ultimo_titulo = dados_cartela["titulo"]
+            logging.info(f"🎴 Cartela #{cartelas_ate_aviso} XML: Título={ultimo_titulo} | Dezenas={dados_cartela['dezenas']}")
 
             decisao = self.gerir_decisao_cartela(dados_cartela)
 
@@ -354,11 +420,14 @@ class AutomacaoADB:
                 )
                 return True
 
-            # Desliza a cartela para a esquerda para carregar a próxima opção
-            logging.info(f"👎 Cartela #{cartelas_ate_aviso} descartada. Arrastando para a próxima...")
-            swipe_adb(1250, 990, 200, 990, 400)
+            # Toca antes em uma área neutra para limpar a mãozinha (que pode ter voltado durante o cálculo)
+            # e só então clica no botão azul de atualizar (↻)
+            logging.info(f"👎 Cartela #{cartelas_ate_aviso} ({ultimo_titulo}) descartada. Limpando tela e clicando em ↻...")
+            tap_adb(720, 1600, random_offset=10)
+            sleep(0.5)
+            clicar_atualizar_cartela(tree)
             tentativas += 1
-            sleep(1.2)
+            sleep(2.5)
 
         logging.warning("❌ Limite de tentativas atingido sem aprovação.")
         return False
@@ -522,7 +591,12 @@ def main():
         if config.get("status") == "PROCESSANDO":
             logging.info("⚡ Comando de início detectado pelo Dashboard!")
 
-            if robo.realizar_login() and robo.entrar_area_compra():
+            tela = robo.garantir_tela_inicial()
+            if tela == "CARTELA":
+                qtd = int(config.get("quantidade", 1))
+                robo.processar_ciclo_ia(titulo_idx=1, qtd_total=qtd)
+                logging.info("✅ Missão concluída (iniciada direto na cartela)!")
+            elif robo.realizar_login() and robo.entrar_area_compra():
                 robo.iniciar_por_dashboard()
                 logging.info("✅ Missão concluída!")
 

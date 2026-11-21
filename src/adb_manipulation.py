@@ -294,5 +294,24 @@ def extrair_cartela_xml(tree: ET.ElementTree | None = None) -> dict:
     }
 
 
+def clicar_atualizar_cartela(tree: ET.ElementTree | None = None) -> bool:
+    """
+    Clica no botão circular azul de atualizar (↻ / ícone '\ue5d5') ao lado do número do título
+    para carregar uma nova cartela com 1 toque via ADB.
+    """
+    arvore = tree if tree is not None else dump_ui_xml()
+    if arvore is not None:
+        for el in arvore.iter("node"):
+            t = el.attrib.get("text", "").strip()
+            if t == "\ue5d5":
+                x1, y1, x2, y2, cx, cy = parse_bounds(el.attrib.get("bounds", ""))
+                if 800 <= cx <= 1100 and 450 <= cy <= 700:
+                    ok, _, _ = tap_adb(cx, cy, random_offset=3)
+                    return ok
+    # Fallback na posição padrão do botão ↻ em 1440x2560
+    ok, _, _ = tap_adb(898, 574, random_offset=3)
+    return ok
+
+
 def random_offset(valor_maximo: int) -> int:
     return int(np.random.randint(-valor_maximo, valor_maximo + 1))

@@ -212,7 +212,7 @@ ARVORE_DECISAO = {
                             "config": {
                                 "media_corte": 57.6,
                                 "nota_corte": 11.8,
-                                "limite_tentativas": 30,
+                                "limite_tentativas": 200,
                                 "espera_entre_limite_tentativas": 300,
                                 "delay_bloqueio": 900, # Tempo que ele vai dormir se o aviso aparecer
                                 "swipe_coords": [1250, 1600, 400, 1600, 500], # x1, y1, x2, y2, duracao
