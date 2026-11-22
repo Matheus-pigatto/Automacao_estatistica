@@ -232,13 +232,27 @@ class AutomacaoADB:
             self.reportar_estado(75, f"Abrindo seleção do título {i} de {qtd_total}...")
             abriu_cartela = False
             for tentativa_abrir in range(3):
-                # Garante que 'Ver mais' não esteja recolhido antes de procurar 'Escolher número'
+                # Se a 1ª tentativa não abriu (modal travado/expirado), fecha e reabre o modal pelo botão Continuar
+                if tentativa_abrir == 1:
+                    logging.warning("🔄 Modal 'Complete seu pedido' não respondeu. Fechando e reabrindo via 'Continuar'...")
+                    clicar_por_texto("Fechar", timeout=3, contem=False, delay_pos=1.5)
+                    clicar_por_texto("Continuar", timeout=5, contem=False, delay_pos=2.5)
+
+                # Garante que 'Ver mais' e 'titulo para escolher' estejam expandidos antes de procurar 'Escolher número'
                 tree_check = dump_ui_xml()
                 if existe_texto_na_tela("Ver mais", tree=tree_check, contem=False) and not existe_texto_na_tela("Escolher número", tree=tree_check, contem=True):
                     no_vm = encontrar_no_xml(tree_check, "Ver mais", contem=False)
                     if no_vm is not None:
                         _, _, _, _, vx, vy = parse_bounds(no_vm.attrib["bounds"])
-                        tap_adb(vx, vy, random_offset=3)
+                        tap_adb(vx, vy, random_offset=0)
+                        sleep(2.0)
+                        tree_check = dump_ui_xml()
+
+                if existe_texto_na_tela("titulo para escolher", tree=tree_check, contem=True) and not existe_texto_na_tela("Escolher número", tree=tree_check, contem=True):
+                    no_tp = encontrar_no_xml(tree_check, "titulo para escolher", contem=True)
+                    if no_tp is not None:
+                        _, _, _, _, tx, ty = parse_bounds(no_tp.attrib["bounds"])
+                        tap_adb(tx, ty, random_offset=0)
                         sleep(2.0)
 
                 no_escolher = self._rolar_modal_ate_visivel("Escolher número", contem=True)
@@ -247,11 +261,10 @@ class AutomacaoADB:
                     return False
 
                 _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
-                # Na 2ª tentativa, clica no centro do card (mais confiável) caso a borda do botão não tenha disparado
-                if tentativa_abrir >= 1:
+                if tentativa_abrir == 2:
                     cx = 720
                 logging.info(f"🖱️ Clicando em 'Escolher número' ({cx}, {cy}) [tentativa {tentativa_abrir + 1}/3]...")
-                tap_adb(cx, cy, random_offset=3)
+                tap_adb(cx, cy, random_offset=0)
 
                 # Aguarda confirmar que a tela da cartela realmente abriu
                 # (ou saiu de 'Complete seu pedido' exibindo o overlay da mãozinha)
