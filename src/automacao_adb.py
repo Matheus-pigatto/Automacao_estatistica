@@ -230,14 +230,39 @@ class AutomacaoADB:
         # 3. Percorre os títulos (1..qtd_total) clicando em 'Escolher número'
         for i in range(1, qtd_total + 1):
             self.reportar_estado(75, f"Abrindo seleção do título {i} de {qtd_total}...")
-            no_escolher = self._rolar_modal_ate_visivel("Escolher número", contem=True)
-            if no_escolher is None:
-                logging.error(f"❌ Botão 'Escolher número' não encontrado para o título {i}.")
-                return False
+            abriu_cartela = False
+            for tentativa_abrir in range(3):
+                # Garante que 'Ver mais' não esteja recolhido antes de procurar 'Escolher número'
+                tree_check = dump_ui_xml()
+                if existe_texto_na_tela("Ver mais", tree=tree_check, contem=False) and not existe_texto_na_tela("Escolher número", tree=tree_check, contem=True):
+                    no_vm = encontrar_no_xml(tree_check, "Ver mais", contem=False)
+                    if no_vm is not None:
+                        _, _, _, _, vx, vy = parse_bounds(no_vm.attrib["bounds"])
+                        tap_adb(vx, vy, random_offset=3)
+                        sleep(2.0)
 
-            _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
-            tap_adb(cx, cy, random_offset=5)
-            sleep(3.0)
+                no_escolher = self._rolar_modal_ate_visivel("Escolher número", contem=True)
+                if no_escolher is None:
+                    logging.error(f"❌ Botão 'Escolher número' não encontrado para o título {i}.")
+                    return False
+
+                _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
+                logging.info(f"🖱️ Clicando em 'Escolher número' ({cx}, {cy}) [tentativa {tentativa_abrir + 1}/3]...")
+                tap_adb(cx, cy, random_offset=3)
+
+                # Aguarda confirmar que a tela da cartela realmente abriu
+                for _ in range(5):
+                    sleep(1.5)
+                    tree_pos = dump_ui_xml(tentativas=1)
+                    if existe_texto_na_tela(["Escolher o titulo", "Confirmar e finalizar"], tree=tree_pos, contem=True):
+                        abriu_cartela = True
+                        break
+                if abriu_cartela:
+                    break
+
+            if not abriu_cartela:
+                logging.error(f"❌ Não foi possível abrir a tela da cartela para o título {i}.")
+                return False
 
             aprovado = self.processar_ciclo_ia(titulo_idx=i, qtd_total=qtd_total)
             if aprovado == "REINICIAR_FLUXO":
@@ -306,8 +331,6 @@ class AutomacaoADB:
         logging.info(f"🚀 Iniciando análise de cartelas via XML + Monte Carlo RAG (Título {titulo_idx}/{qtd_total})...")
 
         while tentativas < limite_tentativas:
-            # Toca na área neutra e já dispara a leitura do XML logo em seguida
-            tap_adb(720, 1600, random_offset=10)
             tree = dump_ui_xml()
             if tree is None:
                 falhas_seguidas += 1
@@ -316,6 +339,11 @@ class AutomacaoADB:
                     return False
                 sleep(1.5)
                 continue
+
+            # Se por algum motivo voltou para 'Complete seu pedido' sem aviso, aborta o ciclo para reabrir direito
+            if existe_texto_na_tela("Complete seu pedido", tree=tree, contem=True):
+                logging.warning("⚠️ Tela voltou para 'Complete seu pedido'. Reiniciando fluxo de seleção...")
+                return "REINICIAR_FLUXO"
 
             aviso_res = self._tratar_avisos_xml(tree, cartelas_ate_aviso)
             if aviso_res == "REINICIAR_FLUXO":
