@@ -247,14 +247,29 @@ class AutomacaoADB:
                     return False
 
                 _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
+                # Na 2ª tentativa, clica no centro do card (mais confiável) caso a borda do botão não tenha disparado
+                if tentativa_abrir >= 1:
+                    cx = 720
                 logging.info(f"🖱️ Clicando em 'Escolher número' ({cx}, {cy}) [tentativa {tentativa_abrir + 1}/3]...")
                 tap_adb(cx, cy, random_offset=3)
 
                 # Aguarda confirmar que a tela da cartela realmente abriu
+                # (ou saiu de 'Complete seu pedido' exibindo o overlay da mãozinha)
                 for _ in range(5):
                     sleep(1.5)
                     tree_pos = dump_ui_xml(tentativas=1)
                     if existe_texto_na_tela(["Escolher o titulo", "Confirmar e finalizar"], tree=tree_pos, contem=True):
+                        abriu_cartela = True
+                        break
+                    if tree_pos is not None and not existe_texto_na_tela("Complete seu pedido", tree=tree_pos, contem=True):
+                        # Saiu do modal 'Complete seu pedido' -> provavelmente abriu a cartela com o overlay da mãozinha
+                        tap_adb(720, 1600, random_offset=5)
+                        sleep(1.0)
+                        tree_pos2 = dump_ui_xml(tentativas=1)
+                        if existe_texto_na_tela(["Escolher o titulo", "Confirmar e finalizar"], tree=tree_pos2, contem=True):
+                            abriu_cartela = True
+                            break
+                        # Mesmo se o overlay ainda estiver fechando, já saiu de 'Complete seu pedido'
                         abriu_cartela = True
                         break
                 if abriu_cartela:
