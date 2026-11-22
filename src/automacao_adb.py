@@ -245,71 +245,37 @@ class AutomacaoADB:
 
     def _tratar_avisos_xml(self, tree, cartelas_ate_aviso: int) -> str | bool:
         """
-        Detecta pop-ups de limite/espera no XML.
-        Quando o app retorna para a tela de Carrinho (Quero 1/2/4) ou Home após fechar o aviso,
-        aguarda a janela de resfriamento (20s) e sinaliza 'REINICIAR_FLUXO' para retornar ao início
-        e entrar novamente na escolha de cartelas.
+        Detecta pop-ups de limite/espera no XML, fecha o aviso e retorna 'REINICIAR_FLUXO'
+        para que o robô volte para a Home e aguarde o cooldown (900s) antes de recomeçar.
         """
         if not existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree, contem=True):
             return False
 
         texto_aviso = self._extrair_texto_aviso(tree)
         inicio_ts = datetime.now()
-        t0 = time()
         delay_espera = int(self.config_ia.get("delay_bloqueio", 900))
 
         logging.warning(
             f"⏳ AVISO DE ESPERA após {cartelas_ate_aviso} cartelas! "
-            f"Texto: '{texto_aviso}' | Fechando aviso e aguardando {delay_espera}s ({delay_espera // 60} min)..."
+            f"Texto: '{texto_aviso}' | Fechando aviso e retornando para a Home..."
         )
         self.reportar_estado(
             80,
-            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Aguardando {delay_espera}s...",
+            f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Voltando para a Home...",
         )
         self.telegram.enviar_mensagem(
             f"⏳ <b>Aviso de espera detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
-            f"Mensagem: <i>{texto_aviso}</i>\nAguardando <b>{delay_espera}s</b> ({delay_espera // 60} min) antes de reiniciar..."
+            f"Mensagem: <i>{texto_aviso}</i>\nVoltando para a Home e aguardando <b>{delay_espera}s</b>..."
         )
 
         clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
-
-        # Aguarda os 900s em fatias de 15s para atualizar o painel e responder rápido se o usuário encerrar
-        while True:
-            decorrido = int(time() - t0)
-            if decorrido >= delay_espera:
-                break
-            cfg_atual = self.carregar_config_dashboard()
-            if cfg_atual and cfg_atual.get("status") != "PROCESSANDO":
-                logging.info("🛑 Busca encerrada pelo usuário durante o tempo de espera.")
-                return False
-            restante = delay_espera - decorrido
-            self.reportar_estado(
-                80,
-                f"⏳ Aviso ({texto_aviso}) — aguardando {restante}s de {delay_espera}s...",
-            )
-            sleep(min(15, restante))
-
-        tempo_espera_s = int(time() - t0)
-
         salvar_log_limite_espera(
             timestamp_aviso=inicio_ts.strftime("%Y-%m-%d %H:%M:%S"),
             cartelas_ate_aviso=cartelas_ate_aviso,
-            tempo_espera_s=tempo_espera_s,
+            tempo_espera_s=delay_espera,
             texto_aviso=texto_aviso,
         )
-
-        # Verifica se o app voltou para Carrinho/Home (comportamento padrão após o aviso)
-        tree_pos = dump_ui_xml()
-        if existe_texto_na_tela(["Quero 1", "Quero 2", "Outra quantidade", "Participe e Concorra", "Seu saldo"], tree=tree_pos, contem=True):
-            logging.info(f"🔄 {tempo_espera_s}s concluídos. Retornando para a tela inicial e reentrando na busca...")
-            self.telegram.enviar_mensagem(
-                f"🔄 <b>Reiniciando busca</b> após {tempo_espera_s}s ({tempo_espera_s / 60:.1f} min) de espera."
-            )
-            return "REINICIAR_FLUXO"
-
-        # Se por acaso ainda estiver na tela da cartela, apenas continua
-        self.telegram.enviar_mensagem(f"✅ <b>Seleção liberada!</b> Tempo de espera: <b>{tempo_espera_s}s</b>.")
-        return True
+        return "REINICIAR_FLUXO"
 
     def processar_ciclo_ia(self, titulo_idx: int = 1, qtd_total: int = 1) -> bool:
         """Lê cartelas via XML, avalia com Monte Carlo RAG e troca por swipe até aprovar."""
@@ -601,8 +567,36 @@ def main():
                         resultado = False
 
                 if resultado == "REINICIAR_FLUXO":
-                    logging.info("🔄 Retornando para a tela inicial/carrinho e reiniciando busca...")
-                    clicar_por_texto("Home", timeout=3, contem=False, delay_pos=1.5)
+                    logging.info("🔄 Retornando para a tela inicial (Home) antes da espera de 900s...")
+                    for _ in range(5):
+                        tree_home = dump_ui_xml()
+                        if existe_texto_na_tela(["Participe e Concorra", "Acessar conta"], tree=tree_home, contem=True):
+                            break
+                        if not clicar_por_texto("Fechar", timeout=2, contem=False, delay_pos=1.2):
+                            if not clicar_por_texto("Home", timeout=2, contem=False, delay_pos=1.5):
+                                from adb_manipulation import _run_adb
+                                _run_adb(["shell", "input", "keyevent", "4"])
+                                sleep(1.5)
+
+                    delay_espera = int(robo.config_ia.get("delay_bloqueio", 900))
+                    t_esp = time()
+                    logging.info(f"⏳ Na tela inicial. Aguardando {delay_espera}s ({delay_espera // 60} min) antes de iniciar nova busca...")
+                    while True:
+                        decorrido = int(time() - t_esp)
+                        if decorrido >= delay_espera:
+                            break
+                        cfg_esp = robo.carregar_config_dashboard()
+                        if not cfg_esp or cfg_esp.get("status") != "PROCESSANDO":
+                            logging.info("🛑 Busca encerrada pelo usuário durante a espera na Home.")
+                            break
+                        restante = delay_espera - decorrido
+                        robo.reportar_estado(80, f"⏳ Na Home aguardando liberação: {restante}s de {delay_espera}s...")
+                        sleep(min(15, restante))
+
+                    cfg_pos = robo.carregar_config_dashboard()
+                    if not cfg_pos or cfg_pos.get("status") != "PROCESSANDO":
+                        break
+                    robo.telegram.enviar_mensagem(f"🔄 <b>900s concluídos na Home!</b> Reiniciando busca...")
                     continue
 
                 logging.info("✅ Missão concluída!")
