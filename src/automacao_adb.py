@@ -466,14 +466,21 @@ class AutomacaoADB:
             decisao = self.gerir_decisao_cartela(dados_cartela)
 
             if decisao == "COMPRAR":
-                logging.info("🔥 CARTELA APROVADA! Confirmando título via XML...")
-                clicar_por_texto(
-                    ["Confirmar e escolher próximo", "Confirmar e finalizar", "Confirmar"],
-                    timeout=10,
-                    contem=True,
-                    delay_pos=2.0,
-                )
-                return True
+                logging.info("🔥 CARTELA APROVADA! Dispensando mãozinha e confirmando título via XML...")
+                confirmou = False
+                for tent_conf in range(3):
+                    tap_adb(720, 1600, random_offset=5)
+                    sleep(1.0)
+                    if clicar_por_texto(
+                        ["Confirmar e escolher próximo", "Confirmar e finalizar", "Confirmar"],
+                        timeout=6,
+                        contem=True,
+                        delay_pos=2.0,
+                    ):
+                        confirmou = True
+                        break
+                    logging.warning(f"⚠️ Botão 'Confirmar' não apareceu (tentativa {tent_conf + 1}/3). Repetindo limpeza...")
+                return confirmou
 
             # Toca antes para limpar a mãozinha, aguarda 1.5s, faz o duplo clique em ↻ (0.5s entre cliques) e aguarda 1.5s
             logging.info(f"👎 Cartela #{cartelas_ate_aviso} ({ultimo_titulo}) descartada. Limpando tela e clicando em ↻...")
