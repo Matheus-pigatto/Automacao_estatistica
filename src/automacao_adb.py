@@ -187,28 +187,45 @@ class AutomacaoADB:
         """Abre a seção 'Número do titulo', seleciona o produto e analisa cada título via XML + RAG."""
         self.reportar_estado(65, f"Abrindo escolha de títulos ({tipo_jogo})...")
 
-        # 1. Expande 'Número do titulo' (se ainda estiver recolhido com 'Ver mais')
-        no_num = self._rolar_modal_ate_visivel("Número do titulo", contem=True)
-        if no_num is None:
-            logging.error("❌ Seção 'Número do titulo' não encontrada no modal.")
-            return False
-
+        # 1. Expande 'Número do titulo' SOMENTE se ainda estiver recolhido ('Ver mais' ativo e 'Ver menos' / títulos ausentes)
         tree_atual = dump_ui_xml()
-        if existe_texto_na_tela("Ver mais", tree=tree_atual, contem=False):
-            _, _, _, _, cx, cy = parse_bounds(no_num.attrib["bounds"])
+        ja_expandido = existe_texto_na_tela(
+            ["Ver menos", "titulo para escolher", "Escolher número"],
+            tree=tree_atual,
+            contem=True,
+        )
+        if not ja_expandido:
+            no_num = self._rolar_modal_ate_visivel("Número do titulo", contem=True)
+            if no_num is None:
+                logging.error("❌ Seção 'Número do titulo' não encontrada no modal.")
+                return False
+
+            tree_atual = dump_ui_xml()
+            if (
+                existe_texto_na_tela("Ver mais", tree=tree_atual, contem=False)
+                and not existe_texto_na_tela(["Ver menos", "titulo para escolher"], tree=tree_atual, contem=True)
+            ):
+                logging.info("🔽 Expandindo dropdown 'Número do titulo' (Ver mais)...")
+                _, _, _, _, cx, cy = parse_bounds(no_num.attrib["bounds"])
+                tap_adb(cx, cy, random_offset=5)
+                sleep(2.0)
+        else:
+            logging.info("ℹ️ Dropdown 'Número do titulo' já está aberto — mantendo expandido.")
+
+        # 2. Abre o grupo do produto ('Vale Cap, X titulo para escolher') SOMENTE se 'Escolher número' ainda não estiver visível
+        tree_atual = dump_ui_xml()
+        if not existe_texto_na_tela("Escolher número", tree=tree_atual, contem=True):
+            alvo_produto = "titulo para escolher"
+            no_prod = self._rolar_modal_ate_visivel(alvo_produto, contem=True)
+            if no_prod is None:
+                logging.error("❌ Opção 'titulo para escolher' não encontrada.")
+                return False
+
+            _, _, _, _, cx, cy = parse_bounds(no_prod.attrib["bounds"])
             tap_adb(cx, cy, random_offset=5)
             sleep(2.0)
-
-        # 2. Abre o grupo do produto ('Vale Cap, X titulo para escolher' / 'Hiper...')
-        alvo_produto = "titulo para escolher"
-        no_prod = self._rolar_modal_ate_visivel(alvo_produto, contem=True)
-        if no_prod is None:
-            logging.error("❌ Opção 'titulo para escolher' não encontrada.")
-            return False
-
-        _, _, _, _, cx, cy = parse_bounds(no_prod.attrib["bounds"])
-        tap_adb(cx, cy, random_offset=5)
-        sleep(2.0)
+        else:
+            logging.info("ℹ️ Grupo do título já está expandido ('Escolher número' visível).")
 
         # 3. Percorre os títulos (1..qtd_total) clicando em 'Escolher número'
         for i in range(1, qtd_total + 1):
