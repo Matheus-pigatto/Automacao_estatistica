@@ -30,6 +30,15 @@ class AbaSimuladas:
                 df_chart = df_sim.iloc[::-1].reset_index(drop=True)[["Weighted_Score", "Pure_Score"]]
                 st.line_chart(df_chart)
 
+                estado_atual = self.db.obter_estado_robo()
+                media_corte_atual = float(estado_atual.get("media_corte", 57.80))
+                score_equiv = max(0.0, min(100.0, 50.0 + (58.10 - media_corte_atual) * 15.0))
+                st.info(
+                    f"📏 **Como interpretar as notas:** A escala de `Weighted_Score` e `Pure_Score` vai de **0 a 100** "
+                    f"(**quanto maior a nota, melhor a cartela**; `50,0` = média aleatória de `58,10` bolas). "
+                    f"Sua média de corte atual (`≤ {media_corte_atual:.2f}` bolas) equivale a **`Weighted_Score ≥ {score_equiv:.2f}`**."
+                )
+
                 st.dataframe(df_sim, use_container_width=True, hide_index=True)
 
         df_esp = self.db.carregar_limites_espera_df()
