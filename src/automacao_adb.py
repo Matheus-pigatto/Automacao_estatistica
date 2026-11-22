@@ -475,8 +475,13 @@ class AutomacaoADB:
                         ["Confirmar e escolher próximo", "Confirmar e finalizar", "Confirmar"],
                         timeout=6,
                         contem=True,
-                        delay_pos=2.0,
+                        delay_pos=2.5,
                     ):
+                        tree_pos = dump_ui_xml(tentativas=1)
+                        if existe_texto_na_tela(["imprevisto", "não conseguimos processar"], tree=tree_pos, contem=True):
+                            logging.warning("⚠️ Aviso 'Tivemos um imprevisto' ao confirmar título. Fechando e reiniciando fluxo...")
+                            clicar_por_texto(["Entendi", "OK"], timeout=4, contem=True, delay_pos=1.5)
+                            return "REINICIAR_FLUXO"
                         confirmou = True
                         break
                     logging.warning(f"⚠️ Botão 'Confirmar' não apareceu (tentativa {tent_conf + 1}/3). Repetindo limpeza...")
