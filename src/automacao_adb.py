@@ -92,7 +92,7 @@ class AutomacaoADB:
             if clicar_por_texto("Home", timeout=2, contem=False, delay_pos=1.5):
                 continue
             logging.info(f"↩️ App fora da Home (tentativa {tentativa + 1}/5). Fechando modal / voltando...")
-            if not clicar_por_texto("Fechar", timeout=2, contem=False, delay_pos=1.5):
+            if not clicar_por_texto("Fechar", timeout=2, contem=False, classe="ViewGroup", min_y=2000, delay_pos=1.5):
                 from adb_manipulation import _run_adb
                 _run_adb(["shell", "input", "keyevent", "4"])
                 sleep(1.5)
@@ -232,11 +232,15 @@ class AutomacaoADB:
             self.reportar_estado(75, f"Abrindo seleção do título {i} de {qtd_total}...")
             abriu_cartela = False
             for tentativa_abrir in range(3):
-                # Se a 1ª tentativa não abriu (modal travado/expirado), fecha e reabre o modal pelo botão Continuar
-                if tentativa_abrir == 1:
-                    logging.warning("🔄 Modal 'Complete seu pedido' não respondeu. Fechando e reabrindo via 'Continuar'...")
-                    clicar_por_texto("Fechar", timeout=3, contem=False, delay_pos=1.5)
-                    clicar_por_texto("Continuar", timeout=5, contem=False, delay_pos=2.5)
+                # Só tenta fechar/reabrir o modal na última tentativa se os cliques diretos em 'Escolher número' falharem
+                if tentativa_abrir == 2:
+                    tree_pre = dump_ui_xml()
+                    if existe_texto_na_tela("Complete seu pedido", tree=tree_pre, contem=True):
+                        logging.warning("🔄 Modal 'Complete seu pedido' não abriu a cartela. Tentando fechar pelo botão inferior 'Fechar'...")
+                        clicar_por_texto("Fechar", timeout=3, contem=False, classe="ViewGroup", min_y=2000, delay_pos=1.5)
+                        tree_pos_fechar = dump_ui_xml()
+                        if not existe_texto_na_tela("Complete seu pedido", tree=tree_pos_fechar, contem=True):
+                            clicar_por_texto("Continuar", timeout=5, contem=False, delay_pos=2.5)
 
                 # Garante que 'Ver mais' e 'titulo para escolher' estejam expandidos antes de procurar 'Escolher número'
                 tree_check = dump_ui_xml()
@@ -261,7 +265,8 @@ class AutomacaoADB:
                     return False
 
                 _, _, _, _, cx, cy = parse_bounds(no_escolher.attrib["bounds"])
-                if tentativa_abrir == 2:
+                if tentativa_abrir == 1:
+                    # Na 2ª tentativa, tenta clicar no centro do card do título sem sair do modal
                     cx = 720
                 logging.info(f"🖱️ Clicando em 'Escolher número' ({cx}, {cy}) [tentativa {tentativa_abrir + 1}/3]...")
                 tap_adb(cx, cy, random_offset=0)
@@ -657,7 +662,7 @@ def main():
                         tree_home = dump_ui_xml()
                         if existe_texto_na_tela(["Participe e Concorra", "Acessar conta"], tree=tree_home, contem=True):
                             break
-                        if not clicar_por_texto("Fechar", timeout=2, contem=False, delay_pos=1.2):
+                        if not clicar_por_texto("Fechar", timeout=2, contem=False, classe="ViewGroup", min_y=2000, delay_pos=1.2):
                             if not clicar_por_texto("Home", timeout=2, contem=False, delay_pos=1.5):
                                 from adb_manipulation import _run_adb
                                 _run_adb(["shell", "input", "keyevent", "4"])
