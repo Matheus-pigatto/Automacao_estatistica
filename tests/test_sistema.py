@@ -226,3 +226,29 @@ def test_telegram_bot_sem_credenciais():
     assert bot.enviar_mensagem("teste") is False
     assert bot.enviar_cartela_aprovacao("123.456", ["01"], {}) is None
     assert bot.verificar_decisao("123.456") is None
+
+
+def test_adb_limites_cards_e_qtd_modal():
+    from automacao_adb import AutomacaoADB
+
+    xml_carrinho = """<?xml version="1.0" encoding="UTF-8"?>
+    <hierarchy rotation="0">
+      <node text="Vale Cap" class="android.widget.TextView" bounds="[42,216][1362,254]" />
+      <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,919][159,973]" />
+      <node text="HiperXCAP" class="android.widget.TextView" bounds="[42,1146][1362,1184]" />
+      <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,1846][158,1900]" />
+    </hierarchy>"""
+    xml_modal = """<?xml version="1.0" encoding="UTF-8"?>
+    <hierarchy rotation="0">
+      <node text="Complete seu pedido" class="android.widget.TextView" bounds="[24,949][1416,985]" />
+      <node text="Qtd. selecionada" class="android.widget.TextView" bounds="[24,1020][300,1050]" />
+      <node text="3" class="android.widget.TextView" bounds="[24,1055][80,1095]" />
+    </hierarchy>"""
+
+    robo = AutomacaoADB(rag_sorteios=None)
+    limites = robo._obter_limites_cards_carrinho(ET.ElementTree(ET.fromstring(xml_carrinho)))
+    assert limites["valecap"] == (0, 1146)
+    assert limites["hiperxcap"] == (1146, 2300)
+
+    qtd_modal = robo._extrair_qtd_modal_pedido(ET.ElementTree(ET.fromstring(xml_modal)))
+    assert qtd_modal == 3

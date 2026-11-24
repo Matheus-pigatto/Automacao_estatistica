@@ -146,15 +146,104 @@ class AutomacaoADB:
         self.reportar_estado(35, "Abrindo Participe e Concorra...")
         return clicar_por_texto("Participe e Concorra", timeout=10, delay_pos=2.5)
 
+    def _obter_limites_cards_carrinho(self, tree) -> dict[str, tuple[int, int]]:
+        """Retorna os limites verticais (min_y, max_y) dos cards Vale Cap e HiperXCAP na tela de quantidade."""
+        no_hiper = encontrar_no_xml(tree, "HiperXCAP", contem=True)
+        if no_hiper is not None:
+            _, y_hiper, _, _, _, _ = parse_bounds(no_hiper.attrib.get("bounds", ""))
+            if y_hiper > 200:
+                return {"valecap": (0, y_hiper), "hiperxcap": (y_hiper, 2300)}
+        return {"valecap": (0, 2300), "hiperxcap": (0, 2300)}
+
+    def _limpar_pre_selecao_cards(self) -> None:
+        """Verifica os dois cards (Vale Cap e HiperXCAP) e limpa qualquer quantidade pré-selecionada."""
+        tree = dump_ui_xml()
+        if tree is None:
+            return
+        limites = self._obter_limites_cards_carrinho(tree)
+
+        for nome_card, (min_y, max_y) in limites.items():
+            # 1. Verifica botões de limpar/remover/diminuir ('-', 'Limpar', 'Remover', 'Diminuir') dentro do card
+            for _ in range(5):
+                tree_atual = dump_ui_xml()
+                if tree_atual is None:
+                    break
+                no_limpar = encontrar_no_xml(
+                    tree_atual,
+                    ["Limpar", "Remover", "Zerar", "Diminuir", "-"],
+                    contem=False,
+                    min_y=min_y,
+                    max_y=max_y,
+                )
+                if no_limpar is None:
+                    break
+                _, _, _, _, lx, ly = parse_bounds(no_limpar.attrib.get("bounds", ""))
+                rotulo = no_limpar.attrib.get("text") or no_limpar.attrib.get("content-desc") or "-"
+                logging.info(f"🧹 Pré-seleção detectada no card '{nome_card}' ('{rotulo}'). Limpando em ({lx}, {ly})...")
+                tap_adb(lx, ly, random_offset=0)
+                sleep(1.0)
+
+            # 2. Verifica algum nó marcado com selected='true' ou checked='true' dentro do card
+            tree_atual = dump_ui_xml()
+            if tree_atual is None:
+                continue
+            for el in tree_atual.iter("node"):
+                if el.attrib.get("selected") == "true" or el.attrib.get("checked") == "true":
+                    _, y1, _, y2, cx, cy = parse_bounds(el.attrib.get("bounds", ""))
+                    if y2 > y1 and min_y <= cy <= max_y:
+                        desc = el.attrib.get("content-desc") or el.attrib.get("text") or "item selecionado"
+                        logging.info(f"🧹 Item pré-selecionado no card '{nome_card}' ('{desc}'). Desmarcando em ({cx}, {cy})...")
+                        tap_adb(cx, cy, random_offset=0)
+                        sleep(1.0)
+                        break
+
+    def _extrair_qtd_modal_pedido(self, tree) -> int | None:
+        """Lê a quantidade exibida em 'Qtd. selecionada' no cabeçalho do modal 'Complete seu pedido'."""
+        if tree is None:
+            return None
+        no_lbl = encontrar_no_xml(tree, "Qtd. selecionada", contem=True)
+        if no_lbl is None:
+            return None
+        _, y1_lbl, _, y2_lbl, _, _ = parse_bounds(no_lbl.attrib.get("bounds", ""))
+        for el in tree.iter("node"):
+            txt = el.attrib.get("text", "").strip()
+            if txt.isdigit():
+                _, y1, _, y2, cx, cy = parse_bounds(el.attrib.get("bounds", ""))
+                if y2 > y1 and cx < 720 and (y2_lbl - 10) <= cy <= (y2_lbl + 120):
+                    return int(txt)
+        return None
+
     def selecionar_quantidade(self, tipo_cap: str = "valecap", qtd: int = 1) -> bool:
-        """Seleciona a quantidade desejada (ex: 'Quero 1', 'Quero 2', 'Quero 4') e clica em Continuar."""
+        """Limpa pré-seleções dos dois cards, seleciona a quantidade apenas no card alvo e avança."""
+        self.reportar_estado(42, "Verificando pré-seleções nos cards...")
+        self._limpar_pre_selecao_cards()
+
+        tree = dump_ui_xml()
+        limites = self._obter_limites_cards_carrinho(tree) if tree is not None else {"valecap": (0, 2300), "hiperxcap": (0, 2300)}
+        chave_card = "hiperxcap" if "hiper" in tipo_cap.lower() else "valecap"
+        min_y, max_y = limites[chave_card]
+
         self.reportar_estado(45, f"Selecionando {qtd} título(s) ({tipo_cap})...")
-        if not clicar_por_texto(f"Quero {qtd}", timeout=10, delay_pos=1.5):
-            logging.error(f"❌ Botão 'Quero {qtd}' não encontrado.")
+        if not clicar_por_texto(f"Quero {qtd}", timeout=10, min_y=min_y, max_y=max_y, delay_pos=1.5):
+            logging.error(f"❌ Botão 'Quero {qtd}' não encontrado dentro do card '{chave_card}' (y={min_y}..{max_y}).")
             return False
 
         self.reportar_estado(55, "Avançando para o pedido...")
-        return clicar_por_texto("Continuar", timeout=10, delay_pos=2.5)
+        if not clicar_por_texto("Continuar", timeout=10, delay_pos=2.5):
+            return False
+
+        # Confirma se o modal 'Complete seu pedido' não somou pré-seleções indesejadas
+        tree_modal = dump_ui_xml()
+        qtd_modal = self._extrair_qtd_modal_pedido(tree_modal)
+        if qtd_modal is not None and qtd_modal != qtd:
+            logging.error(
+                f"❌ Quantidade no pedido ({qtd_modal}) difere do solicitado ({qtd}) — "
+                "havia pré-seleção ativa em um dos cards. Fechando modal..."
+            )
+            clicar_por_texto("Fechar", timeout=3, contem=False, classe="ViewGroup", min_y=2000, delay_pos=1.5)
+            return False
+
+        return True
 
     def _rolar_modal_ate_visivel(self, texto: str, contem: bool = True, max_y: int = 2120, max_scrolls: int = 5):
         """Rola o modal 'Complete seu pedido' até que o elemento fique acima do rodapé fixo."""
