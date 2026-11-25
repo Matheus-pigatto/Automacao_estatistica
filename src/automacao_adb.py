@@ -147,13 +147,22 @@ class AutomacaoADB:
         return clicar_por_texto("Participe e Concorra", timeout=10, delay_pos=2.5)
 
     def _obter_limites_cards_carrinho(self, tree) -> dict[str, tuple[int, int]]:
-        """Retorna os limites verticais (min_y, max_y) dos cards Vale Cap e HiperXCAP na tela de quantidade."""
-        no_hiper = encontrar_no_xml(tree, "HiperXCAP", contem=True)
-        if no_hiper is not None:
-            _, y_hiper, _, _, _, _ = parse_bounds(no_hiper.attrib.get("bounds", ""))
-            if y_hiper > 200:
-                return {"valecap": (0, y_hiper), "hiperxcap": (y_hiper, 2300)}
-        return {"valecap": (0, 2300), "hiperxcap": (0, 2300)}
+        """Retorna os limites verticais (min_y, max_y) dos cards Vale Cap e HiperXCAP, independente da ordem."""
+        no_vale = encontrar_no_xml(tree, "Vale Cap", contem=True, min_y=150)
+        no_hiper = encontrar_no_xml(tree, "HiperXCAP", contem=True, min_y=150)
+
+        y_vale = parse_bounds(no_vale.attrib.get("bounds", ""))[1] if no_vale is not None else None
+        y_hiper = parse_bounds(no_hiper.attrib.get("bounds", ""))[1] if no_hiper is not None else None
+
+        if y_vale is not None and y_hiper is not None:
+            if y_vale < y_hiper:
+                return {"valecap": (y_vale, y_hiper), "hiperxcap": (y_hiper, 2250)}
+            return {"hiperxcap": (y_hiper, y_vale), "valecap": (y_vale, 2250)}
+        if y_vale is not None:
+            return {"valecap": (y_vale, 2250), "hiperxcap": (0, 0)}
+        if y_hiper is not None:
+            return {"valecap": (0, 0), "hiperxcap": (y_hiper, 2250)}
+        return {"valecap": (150, 2250), "hiperxcap": (150, 2250)}
 
     def _limpar_pre_selecao_cards(self) -> None:
         """Verifica os dois cards (Vale Cap e HiperXCAP) e limpa qualquer quantidade pré-selecionada."""
@@ -163,6 +172,8 @@ class AutomacaoADB:
         limites = self._obter_limites_cards_carrinho(tree)
 
         for nome_card, (min_y, max_y) in limites.items():
+            if max_y <= min_y:
+                continue
             # 1. Verifica botões de limpar/remover/diminuir ('-', 'Limpar', 'Remover', 'Diminuir') dentro do card
             for _ in range(5):
                 tree_atual = dump_ui_xml()
@@ -196,6 +207,33 @@ class AutomacaoADB:
                         tap_adb(cx, cy, random_offset=0)
                         sleep(1.0)
                         break
+
+        # 3. No app Vale Cap, botões 'Quero X' pré-selecionados ficam preenchidos em azul (RGB ~(0,114,188))
+        #    mesmo com selected='false' no XML. Verifica a cor de fundo via screencap se Qtd. selecionada > 0.
+        tree_atual = dump_ui_xml()
+        qtd_pre = self._extrair_qtd_modal_pedido(tree_atual)
+        if qtd_pre and qtd_pre > 0 and tree_atual is not None:
+            try:
+                from PIL import Image
+                from adb_manipulation import capturar_cartela_android
+
+                caminho_img = capturar_cartela_android()
+                if caminho_img:
+                    img = Image.open(caminho_img).convert("RGB")
+                    for el in tree_atual.iter("node"):
+                        desc = el.attrib.get("content-desc", "").strip()
+                        if desc.startswith("Quero ") and el.attrib.get("clickable") == "true":
+                            x1, y1, x2, y2, cx, cy = parse_bounds(el.attrib.get("bounds", ""))
+                            if y2 > y1 and 150 <= cy <= 2250:
+                                sx = min(x1 + 15, img.width - 1)
+                                sy = min(max(cy, 0), img.height - 1)
+                                r, _, b = img.getpixel((sx, sy))
+                                if r < 50 and b > 140:
+                                    logging.info(f"🧹 Botão '{desc}' pré-selecionado em azul em ({cx}, {cy}). Desmarcando...")
+                                    tap_adb(cx, cy, random_offset=0)
+                                    sleep(1.0)
+            except Exception as e:
+                logging.debug(f"Aviso ao verificar cor de pré-seleção: {e}")
 
     def _extrair_qtd_modal_pedido(self, tree) -> int | None:
         """Lê a quantidade exibida em 'Qtd. selecionada' no cabeçalho do modal 'Complete seu pedido'."""

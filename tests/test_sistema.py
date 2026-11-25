@@ -231,11 +231,20 @@ def test_telegram_bot_sem_credenciais():
 def test_adb_limites_cards_e_qtd_modal():
     from automacao_adb import AutomacaoADB
 
-    xml_carrinho = """<?xml version="1.0" encoding="UTF-8"?>
+    xml_carrinho_vale_topo = """<?xml version="1.0" encoding="UTF-8"?>
     <hierarchy rotation="0">
+      <node text="Vale Cap" class="android.view.View" bounds="[652,72][764,109]" />
       <node text="Vale Cap" class="android.widget.TextView" bounds="[42,216][1362,254]" />
       <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,919][159,973]" />
       <node text="HiperXCAP" class="android.widget.TextView" bounds="[42,1146][1362,1184]" />
+      <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,1846][158,1900]" />
+    </hierarchy>"""
+    xml_carrinho_hiper_topo = """<?xml version="1.0" encoding="UTF-8"?>
+    <hierarchy rotation="0">
+      <node text="Vale Cap" class="android.view.View" bounds="[652,72][764,109]" />
+      <node text="HiperXCAP" class="android.widget.TextView" bounds="[42,216][1362,254]" />
+      <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,916][158,970]" />
+      <node text="Vale Cap" class="android.widget.TextView" bounds="[42,1143][1362,1181]" />
       <node content-desc="Quero 1" class="android.view.ViewGroup" bounds="[42,1846][158,1900]" />
     </hierarchy>"""
     xml_modal = """<?xml version="1.0" encoding="UTF-8"?>
@@ -246,9 +255,13 @@ def test_adb_limites_cards_e_qtd_modal():
     </hierarchy>"""
 
     robo = AutomacaoADB(rag_sorteios=None)
-    limites = robo._obter_limites_cards_carrinho(ET.ElementTree(ET.fromstring(xml_carrinho)))
-    assert limites["valecap"] == (0, 1146)
-    assert limites["hiperxcap"] == (1146, 2300)
+    limites1 = robo._obter_limites_cards_carrinho(ET.ElementTree(ET.fromstring(xml_carrinho_vale_topo)))
+    assert limites1["valecap"] == (216, 1146)
+    assert limites1["hiperxcap"] == (1146, 2250)
+
+    limites2 = robo._obter_limites_cards_carrinho(ET.ElementTree(ET.fromstring(xml_carrinho_hiper_topo)))
+    assert limites2["hiperxcap"] == (216, 1143)
+    assert limites2["valecap"] == (1143, 2250)
 
     qtd_modal = robo._extrair_qtd_modal_pedido(ET.ElementTree(ET.fromstring(xml_modal)))
     assert qtd_modal == 3
