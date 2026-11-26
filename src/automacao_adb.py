@@ -441,36 +441,46 @@ class AutomacaoADB:
                 continue
             t = el.attrib.get("text", "").strip()
             if t and not (len(t) == 1 and ord(t) > 50000):
-                if any(p in t.lower() for p in ("limite", "muitas pessoas", "aguarde", "imprevisto", "minuto", "espera", "tente")):
+                if any(p in t.lower() for p in ("limite", "excedeu", "muitas pessoas", "aguarde", "imprevisto", "minuto", "espera", "tente")):
                     partes.append(t)
         return " | ".join(dict.fromkeys(partes)) or "Aviso de limite/espera"
 
     def _tratar_avisos_xml(self, tree, cartelas_ate_aviso: int) -> str | bool:
         """
-        Detecta pop-ups de limite/espera no XML, fecha o aviso e retorna 'REINICIAR_FLUXO'
-        para que o robô volte para a Home e aguarde o cooldown (900s) antes de recomeçar.
+        Detecta pop-ups de aviso no XML:
+        - Aviso de excesso/limite ('excedeu', 'limite', 'aguarde'): fecha, registra e retorna 'REINICIAR_FLUXO'
+          para voltar ao menu (Home), aguardar a contagem regressiva e ir para garantir_tela_inicial().
+        - Aviso de tráfego ('muitas pessoas', 'imprevisto'): fecha o aviso e retorna True para voltar a pesquisar.
         """
-        if not existe_texto_na_tela(["limite", "muitas pessoas", "aguarde", "imprevisto"], tree=tree, contem=True):
+        eh_excesso = existe_texto_na_tela(["limite", "excedeu", "aguarde"], tree=tree, contem=True)
+        eh_trafego = existe_texto_na_tela(["muitas pessoas", "imprevisto"], tree=tree, contem=True)
+        if not eh_excesso and not eh_trafego:
             return False
 
         texto_aviso = self._extrair_texto_aviso(tree)
+        clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
+
+        if eh_trafego and not eh_excesso:
+            logging.warning(f"⚠️ Aviso de muitas pessoas comprando ('{texto_aviso}'). Fechando e voltando a pesquisar...")
+            self.reportar_estado(78, f"⚠️ Aviso ({texto_aviso}). Retomando pesquisa...")
+            return True
+
         inicio_ts = datetime.now()
         delay_espera = int(self.config_ia.get("delay_bloqueio", 900))
 
         logging.warning(
-            f"⏳ AVISO DE ESPERA após {cartelas_ate_aviso} cartelas! "
-            f"Texto: '{texto_aviso}' | Fechando aviso e retornando para a Home..."
+            f"⏳ AVISO DE EXCESSO/LIMITE após {cartelas_ate_aviso} cartelas! "
+            f"Texto: '{texto_aviso}' | Retornando para a Home..."
         )
         self.reportar_estado(
             80,
             f"⏳ Aviso após {cartelas_ate_aviso} cartelas ({texto_aviso}). Voltando para a Home...",
         )
         self.telegram.enviar_mensagem(
-            f"⏳ <b>Aviso de espera detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
+            f"⏳ <b>Aviso de limite/excesso detectado</b> após <b>{cartelas_ate_aviso} cartelas</b>.\n"
             f"Mensagem: <i>{texto_aviso}</i>\nVoltando para a Home e aguardando <b>{delay_espera}s</b>..."
         )
 
-        clicar_por_texto(["Entendi", "OK", "Fechar"], timeout=5, contem=True, delay_pos=1.5)
         salvar_log_limite_espera(
             timestamp_aviso=inicio_ts.strftime("%Y-%m-%d %H:%M:%S"),
             cartelas_ate_aviso=cartelas_ate_aviso,
