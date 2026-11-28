@@ -1,0 +1,57 @@
+---
+config:
+  layout: hola
+---
+flowchart TB
+    INICIO(["Abertura do App Vale Cap"]) --> VERIF{"Qual tela está aberta?"}
+    VERIF -- Home --> LOGADO{"Usuário logado?"}
+    LOGADO -- Não --> LOGIN["Preenche CPF e Senha e clica em Acessar"]
+    LOGIN --> PARTICIPE@{ label: "Clica em 'Participe e Concorra'" }
+    LOGADO -- Sim --> PARTICIPE
+    PARTICIPE --> CARRINHO["Tela do Carrinho (Vale Cap e HiperXCAP)"]
+    VERIF -- Carrinho --> CARRINHO
+    CARRINHO --> LIMPA["Verifica os 2 cards e limpa pré-seleções"]
+    LIMPA --> QTD@{ label: "Seleciona 'Quero N' onde N esta gravado no Banco SQL" }
+    QTD --> CONT@{ label: "Clica em 'Continuar'" }
+    CONT --> MODAL@{ label: "Modal 'Complete seu pedido'" }
+    MODAL --> CONFQTD{"Qtd. selecionada == N?"}
+    CONFQTD -- Não --> ABORT(["Fecha modal e interrompe pedido"])
+    CONFQTD -- Sim --> EXP@{ label: "Expande 'Ver mais' / 'titulo para escolher' se recolhido" }
+    EXP --> ESCOLHER@{ label: "Clica em 'Escolher número'" }
+    ESCOLHER --> CARTELA["Tela da Cartela (20 dezenas)"]
+    VERIF -- Cartela --> CARTELA
+    CARTELA --> AVISO{"Há algum aviso na tela?"}
+    AVISO -- Muitas pessoas comprando --> FECHATRAF["Fecha aviso"]
+    FECHATRAF --> CARTELA
+    AVISO -- Excedeu quantidade / limite --> FECHALIM["Fecha aviso e retorna para a Home"]
+    FECHALIM --> ESPERA["Bloco de espera: contagem regressiva (900s)"]
+    ESPERA --> VERIF
+    AVISO -- Não --> LEITURA["Lê as 20 dezenas (XML / OCR)"]
+    LEITURA --> AVAL["Avalia pontuação (Monte Carlo RAG)"]
+    AVAL --> APROV{"Cartela aprovada?"}
+    APROV -- Não --> TROCA["Gera / troca para próxima cartela"]
+    TROCA --> CARTELA
+    APROV -- Sim --> CONFIRMA["Confirma escolha do título"]
+    CONFIRMA --> PROX{"Há mais títulos no pedido?"}
+    PROX -- Sim --> ESCOLHER
+    PROX -- Não --> FIM(["Pedido pronto (pagamento PIX manual)"])
+    INICIO_SITE(["Inicio da configuração do site"]) --> JOGO["Definir parametros de busca"]
+    JOGO --> TIPO{"Qual tipo de Jogo?"}
+    TIPO -- vale cap --> QTD_Desejada("Selecionar N cartelas desejadas")
+    TIPO -- hiper cap --> QTD_Desejada
+    QTD_Desejada --> MEDIA_RAF("Ajustar parametro de corte")
+    MEDIA_RAF --> INICIAR_BUSCA("Iniciar script")
+    INICIAR_BUSCA --> INICIO
+    INICIAR_BUSCA -.-> BANCO_SQL["Banco SQL"]
+    QTD <-.-> BANCO_SQL
+
+    PARTICIPE@{ shape: rect}
+    QTD@{ shape: rect}
+    CONT@{ shape: rect}
+    MODAL@{ shape: rect}
+    EXP@{ shape: rect}
+    ESCOLHER@{ shape: rect}
+    BANCO_SQL@{ shape: db}
+    style INICIO fill:#0b6e4f,color:#ffffff,stroke:#084c36,stroke-width:3px
+    style ESPERA fill:#b45309,color:#ffffff,stroke:#78350f,stroke-width:2px
+    style FIM fill:#145374,color:#ffffff,stroke:#0d3b52,stroke-width:3px

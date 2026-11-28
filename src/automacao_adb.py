@@ -490,8 +490,7 @@ class AutomacaoADB:
         return "REINICIAR_FLUXO"
 
     def processar_ciclo_ia(self, titulo_idx: int = 1, qtd_total: int = 1) -> bool:
-        """Lê cartelas via XML, avalia com Monte Carlo RAG e troca por swipe até aprovar."""
-        limite_tentativas = int(self.config_ia.get("limite_tentativas", 200))
+        """Lê cartelas via XML, avalia com Monte Carlo RAG e troca até aprovar ou o usuário encerrar."""
         tentativas = 0
         cartelas_ate_aviso = 0
         falhas_seguidas = 0
@@ -500,7 +499,12 @@ class AutomacaoADB:
 
         logging.info(f"🚀 Iniciando análise de cartelas via XML + Monte Carlo RAG (Título {titulo_idx}/{qtd_total})...")
 
-        while tentativas < limite_tentativas:
+        while True:
+            cfg_atual = self.carregar_config_dashboard()
+            if not cfg_atual or cfg_atual.get("status") != "PROCESSANDO":
+                logging.info("🛑 Busca encerrada pelo usuário durante a pesquisa de cartelas.")
+                return False
+
             tree = dump_ui_xml()
             if tree is None:
                 falhas_seguidas += 1
@@ -649,9 +653,6 @@ class AutomacaoADB:
             clicar_atualizar_cartela(tree)
             tentativas += 1
             sleep(1.5)
-
-        logging.warning("❌ Limite de tentativas atingido sem aprovação.")
-        return False
 
     def gerir_decisao_cartela(self, dados_cartela: dict) -> str:
         """Executa Monte Carlo ponderado pelo RAG, filtra cartelas frias e consulta o usuário (Streamlit + Telegram)."""
